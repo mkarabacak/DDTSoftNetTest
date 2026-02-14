@@ -1,0 +1,102 @@
+[Defines]
+  INF_VERSION                    = 0x00010006
+  BASE_NAME                      = DDTSoftNetTest
+  FILE_GUID                      = A1B2C3D4-E5F6-7890-ABCD-EF1234567890
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = DDTSoftNetTestMain
+
+[Sources]
+  Source/Main.c
+  Source/UiRenderer.c
+  Source/SystemInfo.c
+  Source/SmbiosParser.c
+  Source/PciEnumerator.c
+  Source/DriverEnumerator.c
+  Source/NicDiscovery.c
+  Source/CompanionLink.c
+  Source/TestRunner.c
+  Source/TestRegistry.c
+  Source/QuickScan.c
+  Source/Layer1Physical.c
+  Source/Layer2DataLink.c
+  Source/Layer3Network.c
+  Source/Layer4Transport.c
+  Source/Layer7Application.c
+  Source/StressTest.c
+  Source/PacketBuilder.c
+  Source/PacketParser.c
+  Source/OsiAnalyzer.c
+  Source/ReportExporter.c
+  Source/Utils.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  NetworkPkg/NetworkPkg.dec
+  ShellPkg/ShellPkg.dec
+  DDTSoftNetTest/DDTSoftNetTest.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  BaseLib
+  BaseMemoryLib
+  MemoryAllocationLib
+  PrintLib
+  DebugLib
+  NetLib
+  ShellLib
+  ShellCommandLib
+  FileHandleLib
+  DevicePathLib
+  HiiLib
+  SortLib
+  HandleParsingLib
+
+[Protocols]
+  gEfiSimpleNetworkProtocolGuid
+  gEfiManagedNetworkServiceBindingProtocolGuid
+  gEfiManagedNetworkProtocolGuid
+  gEfiArpServiceBindingProtocolGuid
+  gEfiArpProtocolGuid
+  gEfiIp4ServiceBindingProtocolGuid
+  gEfiIp4ProtocolGuid
+  gEfiIp4Config2ProtocolGuid
+  gEfiIp6ServiceBindingProtocolGuid
+  gEfiIp6ProtocolGuid
+  gEfiIp6ConfigProtocolGuid
+  gEfiUdp4ServiceBindingProtocolGuid
+  gEfiUdp4ProtocolGuid
+  gEfiTcp4ServiceBindingProtocolGuid
+  gEfiTcp4ProtocolGuid
+  gEfiUdp6ServiceBindingProtocolGuid
+  gEfiUdp6ProtocolGuid
+  gEfiTcp6ServiceBindingProtocolGuid
+  gEfiTcp6ProtocolGuid
+  gEfiDhcp4ServiceBindingProtocolGuid
+  gEfiDhcp4ProtocolGuid
+  gEfiDns4ServiceBindingProtocolGuid
+  gEfiDns4ProtocolGuid
+  gEfiHttpServiceBindingProtocolGuid
+  gEfiHttpProtocolGuid
+  gEfiTlsServiceBindingProtocolGuid
+  gEfiTlsProtocolGuid
+  gEfiPciIoProtocolGuid
+  gEfiLoadedImageProtocolGuid
+  gEfiComponentName2ProtocolGuid
+  gEfiDevicePathProtocolGuid
+  gEfiAdapterInformationProtocolGuid
+
+[Guids]
+  gEfiSmbios3TableGuid
+  gEfiSmbiosTableGuid
+  gEfiAcpi20TableGuid
+  gEfiAcpi10TableGuid
+  gEfiFileInfoGuid
+
+[BuildOptions]
+  GCC:*_*_*_CC_FLAGS = -Wno-unused-variable -fno-stack-protector
+  MSFT:*_*_*_CC_FLAGS = /W4
