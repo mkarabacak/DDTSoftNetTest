@@ -12,18 +12,18 @@ Tam spesifikasyon: PROJECT_SPEC.md dosyasını oku.
 ## Mevcut Durum
 - [x] Faz 0: Proje iskeleti — INF/DSC/DEC, header'lar, UiRenderer, Utils, Main
 - [x] Faz 1: SystemInfo — SmbiosParser, PciEnumerator, DriverEnumerator, ACPI
-- [ ] Faz 2: NIC Discovery — SNP enum, PCI eşleşme, IP config, NIC detay UI
-- [ ] Faz 3: CompanionLink — handshake, kontrol kanalı
-- [ ] Faz 4: PacketBuilder + PacketParser
-- [ ] Faz 5: TestRunner + TestRegistry
-- [ ] Faz 6: Layer 1-2 testleri
-- [ ] Faz 7: Layer 3 testleri
-- [ ] Faz 8: Layer 4 testleri
-- [ ] Faz 9: Layer 7 testleri
-- [ ] Faz 10: QuickScan + otomatik teşhis
-- [ ] Faz 11: StressTest
-- [ ] Faz 12: ReportExporter
-- [ ] Faz 13: Companion (Python)
+- [x] Faz 2: NIC Discovery — SNP enum, PCI eşleşme, IP config, NIC detay UI
+- [x] Faz 3: CompanionLink — handshake, kontrol kanalı
+- [x] Faz 4: PacketBuilder + PacketParser
+- [x] Faz 5: TestRunner + TestRegistry
+- [x] Faz 6: Layer 1-2 testleri
+- [x] Faz 7: Layer 3 testleri
+- [x] Faz 8: Layer 4 testleri
+- [x] Faz 9: Layer 7 testleri
+- [x] Faz 10: QuickScan + otomatik teşhis
+- [x] Faz 11: StressTest
+- [x] Faz 12: ReportExporter
+- [x] Faz 13: Companion (Python)
 
 ## Build Komutu
 ```bash

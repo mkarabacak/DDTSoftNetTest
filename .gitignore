@@ -8,6 +8,16 @@ Build/
 .vscode/
 .idea/
 
+# Claude Code
+.claude/
+
+# Release artifacts
+Release/
+
+# Python cache
+__pycache__/
+*.pyc
+
 # OS files
 .DS_Store
 Thumbs.db

@@ -28,6 +28,10 @@
 #include <Protocol/ComponentName2.h>
 #include <Protocol/DevicePath.h>
 #include <Protocol/AdapterInformation.h>
+#include <Protocol/Dhcp4.h>
+#include <Protocol/Dns4.h>
+#include <Protocol/Http.h>
+#include <Protocol/ServiceBinding.h>
 
 //
 // Application version
@@ -42,10 +46,10 @@
 //
 // Network defaults
 //
-#define DEFAULT_LOCAL_IP       { 192, 168, 100, 10 }
-#define DEFAULT_COMPANION_IP   { 192, 168, 100, 1 }
-#define DEFAULT_SUBNET_MASK    { 255, 255, 255, 0 }
-#define DEFAULT_GATEWAY        { 192, 168, 100, 1 }
+#define DEFAULT_LOCAL_IP       {{ 192, 168, 100, 10 }}
+#define DEFAULT_COMPANION_IP   {{ 192, 168, 100, 1 }}
+#define DEFAULT_SUBNET_MASK    {{ 255, 255, 255, 0 }}
+#define DEFAULT_GATEWAY        {{ 192, 168, 100, 1 }}
 #define CONTROL_CHANNEL_PORT   9999
 #define MAX_INTERFACES         8
 #define MAC_ADDRESS_LENGTH     6
@@ -157,5 +161,57 @@ VOID   UtilStallMs         (IN UINTN Ms);
 UINT64 UtilGetTimestamp     (VOID);
 VOID   UtilAsciiToUnicode  (IN CONST CHAR8 *Ascii, OUT CHAR16 *Unicode, IN UINTN MaxLen);
 VOID   UtilSafeStrCpy      (OUT CHAR16 *Dest, IN CONST CHAR16 *Src, IN UINTN MaxLen);
+
+//
+// Companion link state
+//
+typedef enum {
+  COMPANION_DISCONNECTED,
+  COMPANION_CONNECTING,
+  COMPANION_CONNECTED,
+  COMPANION_ERROR
+} COMPANION_STATE;
+
+//
+// Companion link context
+//
+typedef struct {
+  COMPANION_STATE              State;
+  EFI_HANDLE                   NicHandle;
+  EFI_HANDLE                   Udp4ChildHandle;
+  EFI_UDP4_PROTOCOL            *Udp4;
+  EFI_IPv4_ADDRESS             LocalIp;
+  EFI_IPv4_ADDRESS             CompanionIp;
+  EFI_IPv4_ADDRESS             SubnetMask;
+  UINT16                       Port;
+  UINT32                       TimeoutMs;
+  UINT32                       MessageId;
+  CHAR16                       StatusMsg[128];
+} COMPANION_LINK;
+
+//
+// Companion message buffer size
+//
+#define COMPANION_MAX_MSG_SIZE   512
+#define COMPANION_DEFAULT_TIMEOUT 3000
+
+//
+// CompanionLink functions (CompanionLink.c)
+//
+EFI_STATUS CompanionInit            (IN OUT COMPANION_LINK *Link, IN EFI_HANDLE NicHandle,
+                                     IN EFI_IPv4_ADDRESS *LocalIp, IN EFI_IPv4_ADDRESS *CompanionIp,
+                                     IN EFI_IPv4_ADDRESS *SubnetMask OPTIONAL);
+EFI_STATUS CompanionConnect         (IN OUT COMPANION_LINK *Link);
+EFI_STATUS CompanionDisconnect      (IN OUT COMPANION_LINK *Link);
+EFI_STATUS CompanionDestroy         (IN OUT COMPANION_LINK *Link);
+EFI_STATUS CompanionSendCommand     (IN OUT COMPANION_LINK *Link, IN CONST CHAR8 *Command);
+EFI_STATUS CompanionReceiveResponse (IN OUT COMPANION_LINK *Link, OUT CHAR8 *Response,
+                                     IN UINTN ResponseSize, IN UINT32 TimeoutMs);
+EFI_STATUS CompanionPrepare         (IN OUT COMPANION_LINK *Link, IN CONST CHAR8 *Layer,
+                                     IN CONST CHAR8 *Test, IN CONST CHAR8 *Args OPTIONAL);
+EFI_STATUS CompanionStart           (IN OUT COMPANION_LINK *Link);
+EFI_STATUS CompanionStop            (IN OUT COMPANION_LINK *Link);
+EFI_STATUS CompanionGetResult       (IN OUT COMPANION_LINK *Link, OUT CHAR8 *Result,
+                                     IN UINTN ResultSize);
 
 #endif // DDTSOFT_NET_TEST_H_

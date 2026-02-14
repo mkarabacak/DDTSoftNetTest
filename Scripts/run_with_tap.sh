@@ -1,6 +1,6 @@
 #!/bin/bash
-# DDTSoftNetTest - Build and run in QEMU (user-mode networking)
-# Kullanim: ./build_and_run.sh
+# DDTSoftNetTest - QEMU with TAP networking (for Companion tests)
+# Onkosul: sudo ./setup_tap.sh calistirilmis olmali
 set -e
 
 WORKSPACE_ROOT="/home/mahir-karabacak/workspace"
@@ -32,16 +32,18 @@ sudo umount "$EFI_MNT"
 echo "=== Preparing OVMF ==="
 cp "$OVMF_VARS_SRC" "$OVMF_VARS"
 
-echo "=== Launching QEMU (user-mode net) ==="
+echo "=== Launching QEMU (TAP net: 192.168.100.0/24) ==="
 echo "    Uygulama otomatik baslatilir (BOOTX64.EFI)"
-echo "    Cikis: Ctrl+A, X"
+echo "    DUT IP:        192.168.100.10"
+echo "    Companion IP:  192.168.100.1"
+echo "    Cikis:         Ctrl+A, X"
 echo ""
 
 qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file="$OVMF_VARS" \
   -drive format=raw,file="$EFI_IMG" \
-  -net nic,model=e1000 \
-  -net user \
+  -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
+  -device e1000,netdev=net0 \
   -m 512M \
   -nographic

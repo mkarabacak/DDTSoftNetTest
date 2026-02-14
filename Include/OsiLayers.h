@@ -107,4 +107,132 @@ typedef struct {
                 );
 } TEST_DEFINITION;
 
+//
+// Maximum registered tests
+//
+#define MAX_TESTS  64
+
+//
+// ============================================================
+// TestRegistry functions (TestRegistry.c)
+// ============================================================
+//
+
+//
+// Initialize the test registry with all test definitions
+//
+VOID   RegInitAllTests   (VOID);
+
+//
+// Query functions
+//
+UINTN            RegGetTestCount    (VOID);
+TEST_DEFINITION *RegGetTest         (IN UINTN Index);
+UINTN            RegGetTestsByLayer (IN OSI_LAYER Layer, OUT TEST_DEFINITION **OutArray, IN UINTN MaxCount);
+
+//
+// Name helpers
+//
+CONST CHAR16 *RegGetLayerName  (IN OSI_LAYER Layer);
+CONST CHAR16 *RegGetLayerShort (IN OSI_LAYER Layer);
+CONST CHAR16 *RegGetResultName (IN UINT32 StatusCode);
+CONST CHAR16 *RegGetTypeName   (IN TEST_TYPE Type);
+
+//
+// ============================================================
+// TestRunner functions (TestRunner.c)
+// ============================================================
+//
+
+//
+// Run a single test with timing and result capture
+//
+EFI_STATUS RunSingleTest (
+  IN  TEST_DEFINITION   *Test,
+  IN  NIC_INFO          *Nic,
+  IN  TEST_CONFIG       *Config,
+  OUT TEST_RESULT_DATA  *Result
+  );
+
+//
+// Run all tests for a given OSI layer
+//
+EFI_STATUS RunTestsByLayer (
+  IN  OSI_LAYER         Layer,
+  IN  NIC_INFO          *Nic,
+  IN  TEST_CONFIG       *Config,
+  OUT TEST_RESULT_DATA  *Results,
+  IN  UINTN             MaxResults,
+  OUT UINTN             *ResultCount
+  );
+
+//
+// Run all registered tests
+//
+EFI_STATUS RunAllTests (
+  IN  NIC_INFO          *Nic,
+  IN  TEST_CONFIG       *Config,
+  OUT TEST_RESULT_DATA  *Results,
+  IN  UINTN             MaxResults,
+  OUT UINTN             *ResultCount
+  );
+
+//
+// Check if NIC meets test prerequisites
+//
+BOOLEAN RunCheckPrerequisites (
+  IN TEST_DEFINITION  *Test,
+  IN NIC_INFO         *Nic
+  );
+
+//
+// ============================================================
+// QuickScan functions (QuickScan.c)
+// ============================================================
+//
+
+//
+// Run quick scan with UI (progress, results, diagnosis)
+//
+EFI_STATUS QuickScanRun (
+  IN NIC_INFO     *Nic,
+  IN TEST_CONFIG  *Config
+  );
+
+//
+// Run quick scan silently and return diagnosis string
+//
+EFI_STATUS QuickScanGetDiagnosis (
+  IN  NIC_INFO     *Nic,
+  IN  TEST_CONFIG  *Config,
+  OUT CHAR16       *Diagnosis,
+  IN  UINTN        DiagSize,
+  OUT CHAR16       *Detail     OPTIONAL,
+  IN  UINTN        DetailSize
+  );
+
+//
+// ============================================================
+// StressTest functions (StressTest.c)
+// ============================================================
+//
+
+//
+// Run stress test with UI (mode selection, live stats, RTT graph)
+//
+EFI_STATUS StressTestRun (
+  IN NIC_INFO     *Nic,
+  IN TEST_CONFIG  *Config
+  );
+
+//
+// Run stress test silently and return statistics
+//
+EFI_STATUS StressTestGetStats (
+  IN  NIC_INFO         *Nic,
+  IN  TEST_CONFIG      *Config,
+  IN  UINT32           Mode,
+  OUT TEST_RESULT_DATA *Result
+  );
+
 #endif // OSI_LAYERS_H_

@@ -155,8 +155,7 @@ UiDrawHeader (
 {
   UiSetColor (COLOR_HEADER, COLOR_BG);
   UiDrawBox (1, 0, UI_BOX_WIDTH, 3, NULL);
-  UiPrintAt (3, 1, L" DDTSoft %s EFI Network Test & OSI Analyzer v%s",
-             L"\x2014", APP_VERSION_STRING);
+  UiPrintAt (3, 1, L" DDTSoft - EFI Network Test & OSI Analyzer v1.0.0");
   UiResetColor ();
 }
 

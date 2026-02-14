@@ -1,12 +1,28 @@
 #!/bin/bash
-# Companion testi icin tap interface olustur
+# DDTSoftNetTest - TAP interface setup for Companion testing
+# Kullanim: sudo ./setup_tap.sh
 set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+echo "=== TAP Interface Setup ==="
+
+# Mevcut tap0 varsa sil
+sudo ip link show tap0 &>/dev/null && sudo ip link delete tap0 || true
+
+# Yeni tap0 olustur
 sudo ip tuntap add dev tap0 mode tap user $USER
 sudo ip addr add 192.168.100.1/24 dev tap0
 sudo ip link set tap0 up
+
 echo "tap0 ready: 192.168.100.1/24"
-echo "QEMU komutu:"
-echo "qemu-system-x86_64 -bios /usr/share/OVMF/OVMF_CODE.fd \\"
-echo "  -drive format=raw,file=fat:rw:\$HOME/efi_disk \\"
-echo "  -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \\"
-echo "  -device e1000,netdev=net0 -m 512M -nographic"
+echo ""
+echo "=== Simdi iki terminal ac ==="
+echo ""
+echo "Terminal 1 - Companion:"
+echo "  cd $PROJECT_DIR/Companion"
+echo "  sudo python3 companion.py -i tap0 --ip 192.168.100.1"
+echo ""
+echo "Terminal 2 - QEMU:"
+echo "  $SCRIPT_DIR/run_with_tap.sh"
