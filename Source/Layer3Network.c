@@ -68,7 +68,7 @@ L3ResolveTargetMac (
     0, FALSE, 0, NULL
     );
 
-  Status = Snp->Transmit (Snp, ETHERNET_HEADER_SIZE, TxLen, TxBuf, NULL, NULL, NULL);
+  Status = Snp->Transmit (Snp, 0, TxLen, TxBuf, NULL, NULL, NULL);
   if (EFI_ERROR (Status)) {
     return EFI_NOT_READY;
   }
@@ -205,7 +205,7 @@ L3SendIcmpEcho (
   //
   StartTick = UtilGetTimestamp ();
 
-  Status = Snp->Transmit (Snp, ETHERNET_HEADER_SIZE, TxLen, TxBuf, NULL, NULL, NULL);
+  Status = Snp->Transmit (Snp, 0, TxLen, TxBuf, NULL, NULL, NULL);
   if (EFI_ERROR (Status)) {
     return EFI_NOT_READY;
   }
@@ -1017,7 +1017,7 @@ TestL3IpFragmentation (
     0, FALSE, 0, NULL
     );
 
-  Status = Snp->Transmit (Snp, ETHERNET_HEADER_SIZE, TotalLen, TxBuf, NULL, NULL, NULL);
+  Status = Snp->Transmit (Snp, 0, TotalLen, TxBuf, NULL, NULL, NULL);
   FreePool (TxBuf);
 
   if (EFI_ERROR (Status)) {
@@ -1185,7 +1185,7 @@ TestL3IpHeaderValid (
     0, FALSE, 0, NULL
     );
 
-  Status = Snp->Transmit (Snp, ETHERNET_HEADER_SIZE, TxLen, TxBuf, NULL, NULL, NULL);
+  Status = Snp->Transmit (Snp, 0, TxLen, TxBuf, NULL, NULL, NULL);
   if (EFI_ERROR (Status)) {
     Result->StatusCode = TEST_RESULT_FAIL;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
@@ -1489,7 +1489,7 @@ TestL3DuplicateIp (
     0, FALSE, 0, NULL
     );
 
-  Status = Snp->Transmit (Snp, ETHERNET_HEADER_SIZE, TxLen, TxBuf, NULL, NULL, NULL);
+  Status = Snp->Transmit (Snp, 0, TxLen, TxBuf, NULL, NULL, NULL);
   if (EFI_ERROR (Status)) {
     Result->StatusCode = TEST_RESULT_ERROR;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),

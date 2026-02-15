@@ -379,7 +379,7 @@ QuickApplyDiagnosis (
     if (WarnCount > 0) {
       UnicodeSPrint (ScanResult->Diagnosis, sizeof (ScanResult->Diagnosis),
                      L"Ag calisiyor ama %d katmanda uyarilar var.",
-                     WarnCount);
+                     (int)WarnCount);
       UnicodeSPrint (ScanResult->DiagnosisDetail, sizeof (ScanResult->DiagnosisDetail),
                      L"Kritik hata yok ama bazi testler uyari verdi. "
                      L"Detayli test ile sorunlar arastirilabilir.");
@@ -453,11 +453,11 @@ QuickDisplayResults (
     UiPrintAt (4, Row + I,
                L"  %-24s %3d   %3d   %3d   %3d   %3d  ",
                RegGetLayerName (LR->Layer),
-               LR->TestsRun,
-               LR->TestsPassed,
-               LR->TestsFailed,
-               LR->TestsWarned,
-               LR->TestsSkipped);
+               (int)LR->TestsRun,
+               (int)LR->TestsPassed,
+               (int)LR->TestsFailed,
+               (int)LR->TestsWarned,
+               (int)LR->TestsSkipped);
 
     UiSetColor (StatusColor, COLOR_BG);
     Print (L"%s", StatusStr);
@@ -473,19 +473,19 @@ QuickDisplayResults (
   Row = 14;
   UiPrintAt (4, Row,
              L"  Total: %d tests | ",
-             ScanResult->TotalTests);
+             (int)ScanResult->TotalTests);
   UiSetColor (COLOR_SUCCESS, COLOR_BG);
-  Print (L"%d PASS", ScanResult->TotalPassed);
+  Print (L"%d PASS", (int)ScanResult->TotalPassed);
   UiResetColor ();
   Print (L" | ");
   UiSetColor (COLOR_ERROR, COLOR_BG);
-  Print (L"%d FAIL", ScanResult->TotalFailed);
+  Print (L"%d FAIL", (int)ScanResult->TotalFailed);
   UiResetColor ();
   Print (L" | ");
   UiSetColor (COLOR_WARNING, COLOR_BG);
-  Print (L"%d WARN", ScanResult->TotalWarned);
+  Print (L"%d WARN", (int)ScanResult->TotalWarned);
   UiResetColor ();
-  Print (L" | %d SKIP", ScanResult->TotalSkipped);
+  Print (L" | %d SKIP", (int)ScanResult->TotalSkipped);
 
   //
   // Percentage bar
@@ -604,7 +604,7 @@ QuickScanRun (
   UiDrawBox (2, 3, 76, 18, L" Quick Scan ");
 
   UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (4, 4, L"  Scanning all OSI layers... (%d tests)", TotalQuickTests);
+  UiPrintAt (4, 4, L"  Scanning all OSI layers... (%d tests)", (int)TotalQuickTests);
   UiResetColor ();
 
   //

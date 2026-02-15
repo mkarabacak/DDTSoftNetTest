@@ -158,7 +158,7 @@ StressDrawStats (
   //
   UiPrintAt (4, 5,
              L"  Mode: %-20s  Elapsed: %ds  Progress: %d/%d",
-             ModeStr, Stats->ElapsedS, Iteration, TotalIterations);
+             ModeStr, (int)Stats->ElapsedS, (int)Iteration, (int)TotalIterations);
 
   UiDrawProgress (4, 6, 60, Percent, NULL);
 
@@ -185,7 +185,7 @@ StressDrawStats (
   if (Stats->RttCount > 0 && Stats->RttMinUs != 0xFFFFFFFF) {
     UiPrintAt (4, 12,
                L"  RTT min: %d us  avg: %d us  max: %d us  jitter: %d us    ",
-               Stats->RttMinUs, RttAvg, Stats->RttMaxUs, Jitter);
+               (int)Stats->RttMinUs, (int)RttAvg, (int)Stats->RttMaxUs, (int)Jitter);
   } else {
     UiPrintAt (4, 12,
                L"  RTT: (no data)                                          ");
@@ -246,7 +246,7 @@ StressDrawRttGraph (
   // Draw graph header
   //
   UiPrintAt (4, 14, L"  RTT Graph (last %d samples, max %d us):",
-             SampleCount, MaxRtt);
+             (int)SampleCount, (int)MaxRtt);
 
   //
   // Draw rows top-to-bottom
@@ -254,7 +254,7 @@ StressDrawRttGraph (
   for (Row = 0; Row < STRESS_RTT_GRAPH_HEIGHT; Row++) {
     UINT32  Threshold = (UINT32)((STRESS_RTT_GRAPH_HEIGHT - Row) * MaxRtt / STRESS_RTT_GRAPH_HEIGHT);
 
-    UiPrintAt (4, 15 + Row, L"  %5d|", Threshold);
+    UiPrintAt (4, 15 + Row, L"  %5d|", (int)Threshold);
 
     for (I = 0; I < SampleCount && I < STRESS_RTT_GRAPH_WIDTH; I++) {
       UINTN  Idx = (StartIdx + I) % STRESS_MAX_RTT_SAMPLES;
@@ -332,7 +332,7 @@ StressResolveTargetMac (
 
   Status = Snp->Transmit (
              Snp,
-             ETHERNET_HEADER_SIZE,
+             0,
              ArpSize,
              ArpFrame,
              NULL,
@@ -450,7 +450,7 @@ StressIcmpFlood (
 
     Status = Snp->Transmit (
                Snp,
-               ETHERNET_HEADER_SIZE,
+               0,
                FrameSize,
                Frame,
                NULL,
@@ -588,7 +588,7 @@ StressUdpFlood (
 
     Status = Snp->Transmit (
                Snp,
-               ETHERNET_HEADER_SIZE,
+               0,
                FrameSize,
                Frame,
                NULL,
@@ -683,7 +683,7 @@ StressRawFrameFlood (
   for (I = 0; I < Iterations; I++) {
     Status = Snp->Transmit (
                Snp,
-               ETHERNET_HEADER_SIZE,
+               0,
                sizeof (Frame),
                Frame,
                NULL,
@@ -712,7 +712,7 @@ StressRawFrameFlood (
       //
       Status = Snp->Transmit (
                  Snp,
-                 ETHERNET_HEADER_SIZE,
+                 0,
                  sizeof (Frame),
                  Frame,
                  NULL,
@@ -798,7 +798,7 @@ StressDisplayFinalResults (
   UiPrintAt (4, 5, L"  Mode: %s", ModeStr);
   UiResetColor ();
 
-  UiPrintAt (4, 6, L"  Duration: %d seconds", Stats->ElapsedS);
+  UiPrintAt (4, 6, L"  Duration: %d seconds", (int)Stats->ElapsedS);
 
   UiDrawSeparator (3, 7, 74);
 
@@ -830,9 +830,9 @@ StressDisplayFinalResults (
   if (Stats->RttCount > 0 && Stats->RttMinUs != 0xFFFFFFFF) {
     UiDrawSeparator (3, 16, 74);
     UiPrintAt (4, 17, L"  RTT Min: %d us  Avg: %d us  Max: %d us",
-               Stats->RttMinUs, RttAvg, Stats->RttMaxUs);
+               (int)Stats->RttMinUs, (int)RttAvg, (int)Stats->RttMaxUs);
     UiPrintAt (4, 18, L"  RTT Jitter: %d us  Samples: %d",
-               Jitter, Stats->RttCount);
+               (int)Jitter, (int)Stats->RttCount);
   }
 
   //
@@ -904,9 +904,9 @@ StressTestRun (
   UiPrintAt (6, 12, L"[Q] Cancel");
 
   UiPrintAt (6, 14, L"Iterations: %d  Target: %d.%d.%d.%d",
-             (Config->Iterations > 0) ? Config->Iterations : 100,
-             Config->TargetIp.Addr[0], Config->TargetIp.Addr[1],
-             Config->TargetIp.Addr[2], Config->TargetIp.Addr[3]);
+             (int)((Config->Iterations > 0) ? Config->Iterations : 100),
+             (int)Config->TargetIp.Addr[0], (int)Config->TargetIp.Addr[1],
+             (int)Config->TargetIp.Addr[2], (int)Config->TargetIp.Addr[3]);
 
   UiDrawStatusBar (L"Press 1-4 to start, Q to cancel");
 

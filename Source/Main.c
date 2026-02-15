@@ -91,7 +91,7 @@ DrawSysInfoPage1 (
   UiSetColor (COLOR_INFO, COLOR_BG);
   UiPrintAt (3, 4, L"  Firmware Vendor  : %s", Fw->FirmwareVendor);
   UiPrintAt (3, 5, L"  Firmware Rev     : 0x%08X", Fw->FirmwareRevision);
-  UiPrintAt (3, 6, L"  UEFI Spec        : %d.%d", Fw->UefiSpecMajor, Fw->UefiSpecMinor);
+  UiPrintAt (3, 6, L"  UEFI Spec        : %d.%d", (int)Fw->UefiSpecMajor, (int)Fw->UefiSpecMinor);
 
   UtilAsciiToUnicode (Fw->BiosVendor, TmpBuf, 128);
   UiPrintAt (3, 7, L"  BIOS Vendor      : %s", TmpBuf);
@@ -99,7 +99,7 @@ DrawSysInfoPage1 (
   UiPrintAt (3, 8, L"  BIOS Version     : %s", TmpBuf);
   UtilAsciiToUnicode (Fw->BiosReleaseDate, TmpBuf, 128);
   UiPrintAt (3, 9, L"  BIOS Date        : %s", TmpBuf);
-  UiPrintAt (3, 10, L"  BIOS Release     : %d.%d", Fw->BiosMajorRelease, Fw->BiosMinorRelease);
+  UiPrintAt (3, 10, L"  BIOS Release     : %d.%d", (int)Fw->BiosMajorRelease, (int)Fw->BiosMinorRelease);
   UiPrintAt (3, 11, L"  BIOS ROM Size    : %ld KB", Fw->BiosRomSize / 1024);
 
   UiSetColor (COLOR_HEADER, COLOR_BG);
@@ -146,16 +146,16 @@ DrawSysInfoPage2 (
   UiPrintAt (3, 4, L"  Processor   : %s", TmpBuf);
   UtilAsciiToUnicode (Cpu->SocketDesignation, TmpBuf, 128);
   UiPrintAt (3, 5, L"  Socket      : %s", TmpBuf);
-  UiPrintAt (3, 6, L"  Max Speed   : %d MHz", Cpu->MaxSpeed);
-  UiPrintAt (3, 7, L"  Cur Speed   : %d MHz", Cpu->CurrentSpeed);
-  UiPrintAt (3, 8, L"  Cores       : %d     Threads: %d", Cpu->CoreCount, Cpu->ThreadCount);
+  UiPrintAt (3, 6, L"  Max Speed   : %d MHz", (int)Cpu->MaxSpeed);
+  UiPrintAt (3, 7, L"  Cur Speed   : %d MHz", (int)Cpu->CurrentSpeed);
+  UiPrintAt (3, 8, L"  Cores       : %d     Threads: %d", (int)Cpu->CoreCount, (int)Cpu->ThreadCount);
 
   UiSetColor (COLOR_HEADER, COLOR_BG);
   UiDrawBox (1, 10, 76, 3, L"Memory");
 
   UiSetColor (COLOR_INFO, COLOR_BG);
   UiPrintAt (3, 11, L"  Total: %d MB   Slots: %d/%d populated",
-             Mem->TotalMemoryMB, Mem->PopulatedSlots, Mem->TotalSlots);
+             (int)Mem->TotalMemoryMB, (int)Mem->PopulatedSlots, (int)Mem->TotalSlots);
 
   //
   // Memory slot table header
@@ -180,9 +180,9 @@ DrawSysInfoPage2 (
       UtilAsciiToUnicode (Mem->Slots[I].Manufacturer, MfgBuf, 32);
       UiPrintAt (2, Row, L" %-14s %5d MB %4d  %4d  %-6s %-16s",
                  TmpBuf,
-                 Mem->Slots[I].SizeMB,
-                 Mem->Slots[I].Speed,
-                 Mem->Slots[I].ConfiguredSpeed,
+                 (int)Mem->Slots[I].SizeMB,
+                 (int)Mem->Slots[I].Speed,
+                 (int)Mem->Slots[I].ConfiguredSpeed,
                  GetMemoryTypeName (Mem->Slots[I].MemoryType),
                  MfgBuf);
     }
@@ -210,7 +210,7 @@ DrawSysInfoPage3 (
   UiDrawBox (1, 3, 76, 3, L"PCI Devices");
 
   UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  Total: %d devices", DeviceCount);
+  UiPrintAt (3, 4, L"  Total: %d devices", (int)DeviceCount);
 
   //
   // Table header
@@ -244,7 +244,7 @@ DrawSysInfoPage3 (
   if (DeviceCount > MaxRows) {
     UiSetColor (EFI_DARKGRAY, COLOR_BG);
     UiPrintAt (2, Row + 2, L"  [Up/Down] to scroll (%d-%d of %d)",
-               ScrollOffset + 1, I, DeviceCount);
+               (int)(ScrollOffset + 1), (int)I, (int)DeviceCount);
   }
 }
 
@@ -269,7 +269,7 @@ DrawSysInfoPage4 (
   UiDrawBox (1, 3, 76, 3, L"UEFI Loaded Images");
 
   UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  Total: %d images", DriverCount);
+  UiPrintAt (3, 4, L"  Total: %d images", (int)DriverCount);
 
   //
   // Table header
@@ -295,7 +295,7 @@ DrawSysInfoPage4 (
 
     UiSetColor (Drivers[I].IsDriver ? COLOR_INFO : EFI_LIGHTGRAY, COLOR_BG);
     UiPrintAt (2, Row, L" %3d %-38.38s %6ld KB %s",
-               I + 1,
+               (int)(I + 1),
                Drivers[I].Name,
                Drivers[I].ImageSize / 1024,
                Drivers[I].IsDriver ? L"Driver" : L"App");
@@ -324,10 +324,10 @@ DrawSysInfoPage5 (
   UiDrawBox (1, 3, 76, 9, L"ACPI Information");
 
   UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  ACPI Revision    : %d", Acpi->AcpiRevision);
+  UiPrintAt (3, 4, L"  ACPI Revision    : %d", (int)Acpi->AcpiRevision);
   UtilAsciiToUnicode (Acpi->OemId, OemBuf, 8);
   UiPrintAt (3, 5, L"  OEM ID           : %s", OemBuf);
-  UiPrintAt (3, 6, L"  XSDT Tables      : %d", Acpi->XsdtTableCount);
+  UiPrintAt (3, 6, L"  XSDT Tables      : %d", (int)Acpi->XsdtTableCount);
   UiPrintAt (3, 7, L"  DSDT             : %s", Acpi->HasDsdt ? L"Present" : L"Not found");
   UiPrintAt (3, 8, L"  FADT             : %s", Acpi->HasFadt ? L"Present" : L"Not found");
   UiPrintAt (3, 9, L"  MADT (APIC)      : %s", Acpi->HasMadt ? L"Present" : L"Not found");
@@ -340,7 +340,7 @@ DrawSysInfoPage5 (
   UiDrawBox (1, 12, 76, 3, L"EFI Configuration Tables");
 
   UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 13, L"  Count: %d tables", gST->NumberOfTableEntries);
+  UiPrintAt (3, 13, L"  Count: %d tables", (int)gST->NumberOfTableEntries);
 
   Row = 15;
   UiSetColor (COLOR_WARNING, COLOR_BG);
@@ -349,7 +349,7 @@ DrawSysInfoPage5 (
 
   UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
   for (I = 0; I < gST->NumberOfTableEntries && Row < 23; I++) {
-    UiPrintAt (2, Row, L" %3d %g", I + 1,
+    UiPrintAt (2, Row, L" %3d %g", (int)(I + 1),
                &gST->ConfigurationTable[I].VendorGuid);
     Row++;
   }
@@ -414,15 +414,25 @@ ShowSystemInfo (
   DrvScroll = 0;
   Running = TRUE;
 
+  //
+  // Initial full draw
+  //
+  UiClearScreen ();
+  UiDrawHeader ();
+
   while (Running) {
-    UiClearScreen ();
-    UiDrawHeader ();
+    //
+    // Clear only the content area (rows 1 and 3+), not the whole screen.
+    // This avoids the blank-screen flash on every keypress.
+    //
+    UiClearLines (1, 1);
+    UiClearLines (3, UiGetScreenHeight () - 2);
 
     //
     // Page indicator
     //
     UiSetColor (COLOR_WARNING, COLOR_BG);
-    UiPrintAt (55, 1, L"Page %d/%d", CurrentPage, SYSINFO_TOTAL_PAGES);
+    UiPrintAt (55, 1, L"Page %d/%d", (int)CurrentPage, (int)SYSINFO_TOTAL_PAGES);
 
     //
     // Draw current page
@@ -566,6 +576,18 @@ DDTSoftNetTestMain (
   BOOLEAN        Running;
 
   //
+  // Disable watchdog timer — UEFI sets a 5-min watchdog that reboots
+  // the system if the app doesn't return or disable it in time.
+  //
+  gBS->SetWatchdogTimer (0, 0, 0, NULL);
+
+  //
+  // Try to set a higher resolution console mode (wider screen)
+  //
+  UiSetBestConsoleMode ();
+  UiHideCursor ();
+
+  //
   // Clear screen and show splash
   //
   UiClearScreen ();
@@ -636,11 +658,17 @@ DrawNicList (
   CHAR16  MacStr[20];
   CHAR16  IpStr[20];
 
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 3, 76, 3, L"Network Interfaces");
+  {
+    UINTN  BoxW;
+    BoxW = UiGetScreenWidth () - 2;
+    if (BoxW < 76) BoxW = 76;
+
+    UiSetColor (COLOR_HEADER, COLOR_BG);
+    UiDrawBox (1, 3, BoxW, 3, L"Network Interfaces");
+  }
 
   UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  Found: %d interface(s)", NicCount);
+  UiPrintAt (3, 4, L"  Found: %d interface(s)", (int)NicCount);
 
   if (NicCount == 0) {
     UiSetColor (COLOR_WARNING, COLOR_BG);
@@ -654,8 +682,8 @@ DrawNicList (
   //
   Row = 6;
   UiSetColor (COLOR_WARNING, COLOR_BG);
-  UiPrintAt (2, Row, L" # %-18s %-13s %-7s %-5s %-15s",
-             L"MAC Address", L"State", L"Media", L"IP4", L"Address");
+  UiPrintAt (2, Row, L" # %-12s %-26s %-18s %-7s %-15s",
+             L"Vendor", L"Model", L"MAC Address", L"Media", L"Address");
   Row++;
 
   for (I = 0; I < NicCount && Row < 22; I++) {
@@ -673,12 +701,12 @@ DrawNicList (
       UiSetColor (COLOR_DEFAULT, COLOR_BG);
     }
 
-    UiPrintAt (2, Row, L" %d %-18s %-13s %-7s %-5s %-15s",
-               I + 1,
+    UiPrintAt (2, Row, L" %d %-12s %-26.26s %-18s %-7s %-15s",
+               (int)(I + 1),
+               Nics[I].HasPciInfo ? Nics[I].VendorName : L"Unknown",
+               Nics[I].HasPciInfo ? Nics[I].DeviceModel : L"--",
                MacStr,
-               GetSnpStateName (Nics[I].State),
                Nics[I].MediaPresent ? L"Up" : L"Down",
-               Nics[I].HasIp4 ? L"Yes" : L"No",
                IpStr);
     Row++;
   }
@@ -697,79 +725,98 @@ DrawNicDetail (
   CHAR16  IpStr[20];
   UINTN   Row;
 
-  //
-  // Identity box
-  //
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 3, 76, 8, L"NIC Detail");
+  {
+    UINTN  BoxW;
+    BoxW = UiGetScreenWidth () - 2;
+    if (BoxW < 76) BoxW = 76;
 
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  Name         : %s", Nic->Name);
+    //
+    // Hardware Identity box
+    //
+    UiSetColor (COLOR_HEADER, COLOR_BG);
+    UiDrawBox (1, 3, BoxW, 12, L"NIC Hardware");
 
-  UtilFormatMac (Nic->CurrentMac.Addr, MacStr);
-  UiPrintAt (3, 5, L"  Current MAC  : %s", MacStr);
+    UiSetColor (COLOR_INFO, COLOR_BG);
+    UiPrintAt (3, 4, L"  Name         : %s", Nic->Name);
 
-  UtilFormatMac (Nic->PermanentMac.Addr, MacStr);
-  UiPrintAt (3, 6, L"  Permanent MAC: %s", MacStr);
+    if (Nic->HasPciInfo) {
+      UiPrintAt (3, 5, L"  Vendor       : %s", Nic->VendorName);
+      UiPrintAt (3, 6, L"  Model        : %s", Nic->DeviceModel);
+      UiPrintAt (3, 7, L"  PCI IDs      : %04X:%04X (Sub %04X:%04X)",
+                 Nic->PciVendorId, Nic->PciDeviceId,
+                 Nic->PciSubsysVendorId, Nic->PciSubsysDeviceId);
+      UiPrintAt (3, 8, L"  PCI Location : Bus %02X  Dev %02X  Func %X",
+                 Nic->PciBus, Nic->PciDev, Nic->PciFunc);
+    } else {
+      UiSetColor (EFI_DARKGRAY, COLOR_BG);
+      UiPrintAt (3, 5, L"  Vendor       : (PCI info not available)");
+      UiSetColor (COLOR_INFO, COLOR_BG);
+    }
 
-  UiPrintAt (3, 7, L"  State        : %s", GetSnpStateName (Nic->State));
-  UiPrintAt (3, 8, L"  Media        : %s",
-             Nic->MediaPresent ? L"Connected" : L"Disconnected");
-  UiPrintAt (3, 9, L"  Max Packet   : %d bytes    Header: %d bytes",
-             Nic->MaxPacketSize, Nic->MediaHeaderSize);
+    UtilFormatMac (Nic->CurrentMac.Addr, MacStr);
+    UiPrintAt (3, 9,  L"  Current MAC  : %s", MacStr);
 
-  //
-  // IP Configuration box
-  //
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 11, 76, 7, L"IP Configuration");
+    UtilFormatMac (Nic->PermanentMac.Addr, MacStr);
+    UiPrintAt (3, 10, L"  Permanent MAC: %s", MacStr);
 
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  if (Nic->HasIpConfig) {
-    UtilFormatIpv4 (Nic->Ipv4Address.Addr, IpStr);
-    UiPrintAt (3, 12, L"  IPv4 Address : %s", IpStr);
-    UtilFormatIpv4 (Nic->SubnetMask.Addr, IpStr);
-    UiPrintAt (3, 13, L"  Subnet Mask  : %s", IpStr);
-    UtilFormatIpv4 (Nic->Gateway.Addr, IpStr);
-    UiPrintAt (3, 14, L"  Gateway      : %s", IpStr);
-  } else {
-    UiSetColor (COLOR_WARNING, COLOR_BG);
-    UiPrintAt (3, 12, L"  No IPv4 configuration available");
+    UiPrintAt (3, 11, L"  State        : %s", GetSnpStateName (Nic->State));
+    UiPrintAt (3, 12, L"  Media        : %s", Nic->MediaPresent ? L"Connected" : L"Disconnected");
+    UiPrintAt (3, 13, L"  Max Packet   : %d bytes   Header: %d bytes",
+               (int)Nic->MaxPacketSize, (int)Nic->MediaHeaderSize);
+
+    //
+    // IP Configuration box
+    //
+    UiSetColor (COLOR_HEADER, COLOR_BG);
+    UiDrawBox (1, 15, BoxW, 6, L"IP Configuration");
+
+    UiSetColor (COLOR_INFO, COLOR_BG);
+    if (Nic->HasIpConfig) {
+      UtilFormatIpv4 (Nic->Ipv4Address.Addr, IpStr);
+      UiPrintAt (3, 16, L"  IPv4 Address : %s", IpStr);
+      UtilFormatIpv4 (Nic->SubnetMask.Addr, IpStr);
+      UiPrintAt (3, 17, L"  Subnet Mask  : %s", IpStr);
+      UtilFormatIpv4 (Nic->Gateway.Addr, IpStr);
+      UiPrintAt (3, 18, L"  Gateway      : %s", IpStr);
+    } else {
+      UiSetColor (COLOR_WARNING, COLOR_BG);
+      UiPrintAt (3, 16, L"  No IPv4 configuration available");
+    }
+
+    UiPrintAt (3, 19, L"  MAC Changeable: %s   Multi TX: %s",
+               Nic->MacChangeable ? L"Yes" : L"No",
+               Nic->MultipleTxSupported ? L"Yes" : L"No");
+
+    //
+    // Protocol stack box
+    //
+    Row = 21;
+    UiSetColor (COLOR_HEADER, COLOR_BG);
+    UiDrawBox (1, Row, BoxW, 5, L"Protocol Stack");
+
+    Row++;
+    UiSetColor (COLOR_LAYER3, COLOR_BG);
+    UiPrintAt (3, Row, L"  MNP:%s  ARP:%s  IP4:%s  IP6:%s  TCP4:%s",
+               Nic->HasMnp  ? L"+" : L"-",
+               Nic->HasArp  ? L"+" : L"-",
+               Nic->HasIp4  ? L"+" : L"-",
+               Nic->HasIp6  ? L"+" : L"-",
+               Nic->HasTcp4 ? L"+" : L"-");
+    Row++;
+    UiPrintAt (3, Row, L"  UDP4:%s  DHCP4:%s  DNS4:%s  HTTP:%s  TLS:%s",
+               Nic->HasUdp4  ? L"+" : L"-",
+               Nic->HasDhcp4 ? L"+" : L"-",
+               Nic->HasDns4  ? L"+" : L"-",
+               Nic->HasHttp  ? L"+" : L"-",
+               Nic->HasTls   ? L"+" : L"-");
+
+    //
+    // Device path
+    //
+    Row += 2;
+    UiSetColor (EFI_DARKGRAY, COLOR_BG);
+    UiPrintAt (2, Row, L"  Path: %.70s", Nic->DevicePath);
   }
-
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 15, L"  MAC Changeable   : %s", Nic->MacChangeable ? L"Yes" : L"No");
-  UiPrintAt (3, 16, L"  Multi TX         : %s", Nic->MultipleTxSupported ? L"Yes" : L"No");
-
-  //
-  // Protocol stack box
-  //
-  Row = 18;
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, Row, 76, 5, L"Protocol Stack");
-
-  Row++;
-  UiSetColor (COLOR_LAYER3, COLOR_BG);
-  UiPrintAt (3, Row, L"  MNP:%s  ARP:%s  IP4:%s  IP6:%s  TCP4:%s",
-             Nic->HasMnp  ? L"+" : L"-",
-             Nic->HasArp  ? L"+" : L"-",
-             Nic->HasIp4  ? L"+" : L"-",
-             Nic->HasIp6  ? L"+" : L"-",
-             Nic->HasTcp4 ? L"+" : L"-");
-  Row++;
-  UiPrintAt (3, Row, L"  UDP4:%s  DHCP4:%s  DNS4:%s  HTTP:%s  TLS:%s",
-             Nic->HasUdp4  ? L"+" : L"-",
-             Nic->HasDhcp4 ? L"+" : L"-",
-             Nic->HasDns4  ? L"+" : L"-",
-             Nic->HasHttp  ? L"+" : L"-",
-             Nic->HasTls   ? L"+" : L"-");
-
-  //
-  // Device path
-  //
-  Row += 2;
-  UiSetColor (EFI_DARKGRAY, COLOR_BG);
-  UiPrintAt (2, Row, L"  Path: %.70s", Nic->DevicePath);
 }
 
 /**
@@ -812,7 +859,7 @@ TestCompanionConnection (
   UiPrintAt (3, Row, L"  Companion IP : %s", IpStr);
   Row++;
 
-  UiPrintAt (3, Row, L"  Port         : %d", CONTROL_CHANNEL_PORT);
+  UiPrintAt (3, Row, L"  Port         : %d", (int)CONTROL_CHANNEL_PORT);
   Row += 2;
 
   //
@@ -918,9 +965,17 @@ ShowNetworkInterfaces (
   DetailView = FALSE;
   Running = TRUE;
 
+  //
+  // Initial full draw
+  //
+  UiClearScreen ();
+  UiDrawHeader ();
+
   while (Running) {
-    UiClearScreen ();
-    UiDrawHeader ();
+    //
+    // Clear only the content area below the header
+    //
+    UiClearLines (3, UiGetScreenHeight () - 2);
 
     if (DetailView) {
       DrawNicDetail (&Nics[Selected]);
@@ -984,6 +1039,24 @@ DrawTestResults (
   UINTN   SkipCount;
   UINTN   WarnCount;
   UINTN   ErrCount;
+  UINTN   BoxW;
+  UINTN   ScrH;
+  UINTN   SumW;
+
+  BoxW = UiGetScreenWidth () - 2;
+  if (BoxW < 76) {
+    BoxW = 76;
+  }
+  ScrH = UiGetScreenHeight ();
+
+  //
+  // Summary column width = total width minus fixed columns (# + Lyr + Name + Result + spacing)
+  // Fixed: " %2d  %-4s %-22.22s %-6s " = ~40 chars
+  //
+  SumW = BoxW - 40;
+  if (SumW < 20) {
+    SumW = 20;
+  }
 
   PassCount = 0;
   FailCount = 0;
@@ -1005,32 +1078,35 @@ DrawTestResults (
   // Summary box
   //
   UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 3, 76, 4, L"Test Results");
+  UiDrawBox (1, 3, BoxW, 4, L"Test Results");
 
   UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  %s  |  Total: %d", RegGetLayerName (Layer), Count);
+  UiPrintAt (3, 4, L"  %s  |  Total: %d", RegGetLayerName (Layer), (int)Count);
 
   UiSetColor (COLOR_SUCCESS, COLOR_BG);
-  UiPrintAt (3, 5, L"  PASS:%d", PassCount);
+  UiPrintAt (3, 5, L"  PASS:%d", (int)PassCount);
   UiSetColor (COLOR_ERROR, COLOR_BG);
-  Print (L"  FAIL:%d", FailCount);
+  Print (L"  FAIL:%d", (int)FailCount);
   UiSetColor (COLOR_WARNING, COLOR_BG);
-  Print (L"  WARN:%d", WarnCount);
+  Print (L"  WARN:%d", (int)WarnCount);
   UiSetColor (EFI_DARKGRAY, COLOR_BG);
-  Print (L"  SKIP:%d", SkipCount);
+  Print (L"  SKIP:%d", (int)SkipCount);
   UiSetColor (COLOR_ERROR, COLOR_BG);
-  Print (L"  ERR:%d", ErrCount);
+  Print (L"  ERR:%d", (int)ErrCount);
 
   //
-  // Result table
+  // Result table header
   //
   Row = 7;
   UiSetColor (COLOR_WARNING, COLOR_BG);
-  UiPrintAt (2, Row, L" %-3s %-4s %-22s %-6s %-38s",
-             L"#", L"Lyr", L"Test Name", L"Result", L"Summary");
+  UiPrintAt (2, Row, L" %-3s %-4s %-22s %-6s %-*s",
+             L"#", L"Lyr", L"Test Name", L"Result", (int)SumW, L"Summary");
   Row++;
 
-  MaxRows = 14;
+  //
+  // MaxRows adapts to screen height: leave room for header(3) + summary box(4) + table header(1) + footer(2)
+  //
+  MaxRows = (ScrH > 12) ? (ScrH - 10) : 14;
 
   for (I = ScrollOffset; I < Count && (I - ScrollOffset) < MaxRows; I++) {
     Row = 8 + (I - ScrollOffset);
@@ -1044,20 +1120,21 @@ DrawTestResults (
       default:                UiSetColor (COLOR_DEFAULT, COLOR_BG);  break;
     }
 
-    UiPrintAt (2, Row, L" %2d  %-4s %-22.22s %-6s %-38.38s",
-               I + 1,
+    UiPrintAt (2, Row, L" %2d  %-4s %-22.22s %-6s %-*.*s",
+               (int)(I + 1),
                RegGetLayerShort (Tests[I]->Layer),
                Tests[I]->Name,
                RegGetResultName (Results[I].StatusCode),
+               (int)SumW, (int)SumW,
                Results[I].Summary);
   }
 
   if (Count > MaxRows) {
     UiSetColor (EFI_DARKGRAY, COLOR_BG);
-    UiPrintAt (2, 22, L"  [Up/Down] scroll (%d-%d of %d)",
-               ScrollOffset + 1,
-               (ScrollOffset + MaxRows < Count) ? ScrollOffset + MaxRows : Count,
-               Count);
+    UiPrintAt (2, 8 + (int)MaxRows, L"  [Up/Down] scroll (%d-%d of %d)",
+               (int)(ScrollOffset + 1),
+               (int)((ScrollOffset + MaxRows < Count) ? ScrollOffset + MaxRows : Count),
+               (int)Count);
   }
 }
 
@@ -1079,34 +1156,49 @@ ExecuteTestsWithProgress (
   UINTN            TestCount;
   UINTN            I;
   UINTN            Percent;
+  UINTN            BoxW;
+  UINTN            BarW;
 
   TestCount = RegGetTestsByLayer (Layer, Tests, MAX_TESTS);
   *OutCount = 0;
+
+  BoxW = UiGetScreenWidth () - 2;
+  if (BoxW < 76) {
+    BoxW = 76;
+  }
+  BarW = BoxW - 6;
+
+  //
+  // Draw the static frame once before the loop
+  //
+  UiClearScreen ();
+  UiDrawHeader ();
+
+  UiSetColor (COLOR_HEADER, COLOR_BG);
+  UiDrawBox (1, 3, BoxW, 10, L"Running Tests");
+
+  UiSetColor (COLOR_INFO, COLOR_BG);
+  UiPrintAt (3, 4, L"  %s", RegGetLayerName (Layer));
+  UiPrintAt (3, 5, L"  NIC: %s", Nic->Name);
 
   for (I = 0; I < TestCount; I++) {
     Percent = (TestCount > 0) ? ((I * 100) / TestCount) : 0;
 
     //
-    // Show progress
+    // Update only the changing lines (test name, description, progress, type)
     //
-    UiClearScreen ();
-    UiDrawHeader ();
-
-    UiSetColor (COLOR_HEADER, COLOR_BG);
-    UiDrawBox (1, 3, 76, 10, L"Running Tests");
+    UiClearLines (7, 12);
 
     UiSetColor (COLOR_INFO, COLOR_BG);
-    UiPrintAt (3, 4, L"  %s", RegGetLayerName (Layer));
-    UiPrintAt (3, 5, L"  NIC: %s", Nic->Name);
-    UiPrintAt (3, 7, L"  Test %d/%d: %s", I + 1, TestCount, Tests[I]->Name);
+    UiPrintAt (3, 7, L"  Test %d/%d: %s", (int)(I + 1), (int)TestCount, Tests[I]->Name);
     UiPrintAt (3, 8, L"  %s", Tests[I]->Description);
 
-    UiDrawProgress (3, 10, 72, Percent, L"Progress");
+    UiDrawProgress (3, 10, BarW, Percent, L"Progress");
 
     UiSetColor (EFI_DARKGRAY, COLOR_BG);
-    UiPrintAt (3, 12, L"  Type: %s  |  Target: %s",
+    UiPrintAt (3, 12, L"  Type: %-12s |  Target: %s",
                RegGetTypeName (Tests[I]->Type),
-               Tests[I]->RequiresTarget ? L"Required" : L"Not needed");
+               Tests[I]->RequiresTarget ? L"Required    " : L"Not needed  ");
 
     //
     // Run the test
@@ -1141,11 +1233,17 @@ ShowTestMenu (
   UINTN             ResultScroll;
   BOOLEAN           HasResults;
   CHAR16            IpStr[20];
+  UINTN             BoxW;
 
   //
   // Initialize test registry
   //
   RegInitAllTests ();
+
+  BoxW = UiGetScreenWidth () - 2;
+  if (BoxW < 76) {
+    BoxW = 76;
+  }
 
   //
   // Discover NICs
@@ -1217,10 +1315,10 @@ ShowTestMenu (
       UiDrawHeader ();
 
       UiSetColor (COLOR_HEADER, COLOR_BG);
-      UiDrawBox (1, 3, 76, 5, L"Run Tests");
+      UiDrawBox (1, 3, BoxW, 5, L"Run Tests");
 
       UiSetColor (COLOR_INFO, COLOR_BG);
-      UiPrintAt (3, 4, L"  NIC       : [%d] %s", SelectedNic + 1, Nics[SelectedNic].Name);
+      UiPrintAt (3, 4, L"  NIC       : [%d] %s", (int)(SelectedNic + 1), Nics[SelectedNic].Name);
 
       if (Nics[SelectedNic].HasIpConfig) {
         UtilFormatIpv4 (Nics[SelectedNic].Ipv4Address.Addr, IpStr);
@@ -1233,13 +1331,13 @@ ShowTestMenu (
       UiPrintAt (3, 6, L"  Target IP : %s", IpStr);
 
       UiSetColor (COLOR_INFO, COLOR_BG);
-      UiPrintAt (3, 7, L"  Tests     : %d registered", RegGetTestCount ());
+      UiPrintAt (3, 7, L"  Tests     : %d registered", (int)RegGetTestCount ());
 
       //
       // Layer selection
       //
       UiSetColor (COLOR_HEADER, COLOR_BG);
-      UiDrawBox (1, 9, 76, 12, L"Select Test Layer");
+      UiDrawBox (1, 9, BoxW, 12, L"Select Test Layer");
 
       UiSetColor (COLOR_LAYER1, COLOR_BG);
       UiPrintAt (5, 10, L"[1] Layer 1 - Physical        (5 tests)");
@@ -1322,12 +1420,17 @@ ShowTestMenu (
 
       HasResults = TRUE;
 
-    } else {
       //
-      // Results display
+      // Redraw header after test execution cleared the screen
       //
       UiClearScreen ();
       UiDrawHeader ();
+
+    } else {
+      //
+      // Results display — clear content area only, keep header stable
+      //
+      UiClearLines (3, UiGetScreenHeight () - 2);
       DrawTestResults (TestPtrs, Results, ResultCount, SelectedLayer, ResultScroll);
       UiDrawStatusBar (L"[Up/Down] Scroll  [R] Run again  [ESC] Back to menu");
 
@@ -1336,8 +1439,12 @@ ShowTestMenu (
       if (Key.ScanCode == SCAN_ESC || Key.UnicodeChar == L'q' || Key.UnicodeChar == L'Q') {
         HasResults = FALSE;
       } else if (Key.ScanCode == SCAN_DOWN) {
-        if (ResultCount > 14 && ResultScroll + 14 < ResultCount) {
-          ResultScroll++;
+        {
+          UINTN  VisRows;
+          VisRows = (UiGetScreenHeight () > 12) ? (UiGetScreenHeight () - 10) : 14;
+          if (ResultCount > VisRows && ResultScroll + VisRows < ResultCount) {
+            ResultScroll++;
+          }
         }
       } else if (Key.ScanCode == SCAN_UP) {
         if (ResultScroll > 0) {
@@ -1358,6 +1465,12 @@ ShowTestMenu (
           Results,
           &ResultCount
           );
+
+        //
+        // Redraw header after test execution cleared the screen
+        //
+        UiClearScreen ();
+        UiDrawHeader ();
       }
     }
   }

@@ -111,6 +111,19 @@ typedef struct {
   EFI_IPv4_ADDRESS               SubnetMask;
   EFI_IPv4_ADDRESS               Gateway;
 
+  // PCI device info
+  BOOLEAN                        HasPciInfo;
+  UINT16                         PciVendorId;
+  UINT16                         PciDeviceId;
+  UINT16                         PciSubsysVendorId;
+  UINT16                         PciSubsysDeviceId;
+  UINT8                          PciBus;
+  UINT8                          PciDev;
+  UINT8                          PciFunc;
+  UINT8                          PciClassCode;
+  CHAR16                         VendorName[32];
+  CHAR16                         DeviceModel[48];
+
   // Upper-layer protocol support
   BOOLEAN                        HasMnp;
   BOOLEAN                        HasArp;

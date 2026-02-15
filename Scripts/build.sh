@@ -13,4 +13,8 @@ export PACKAGES_PATH="$EDK2_DIR:$DDTSOFT_DIR"
 echo "=== Building DDTSoftNetTest ==="
 build -a X64 -t GCC5 -p DDTSoftNetTest/DDTSoftNetTest.dsc -b DEBUG
 echo "=== Build OK ==="
-echo "Output: $EDK2_DIR/Build/DDTSoftNetTest/DEBUG_GCC5/X64/DDTSoftNetTest.efi"
+
+RELEASE_DIR="$DDTSOFT_DIR/DDTSoftNetTest/Release"
+mkdir -p "$RELEASE_DIR"
+cp Build/DDTSoftNetTest/DEBUG_GCC5/X64/DDTSoftNetTest.efi "$RELEASE_DIR/"
+echo "=== Release updated: $RELEASE_DIR/DDTSoftNetTest.efi ==="

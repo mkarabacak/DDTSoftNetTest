@@ -182,3 +182,21 @@ PciLookupClassName (
 
   return L"Unknown";
 }
+
+CONST CHAR16 *
+PciLookupNicDeviceName (
+  IN UINT16  VendorId,
+  IN UINT16  DeviceId
+  )
+{
+  UINTN  I;
+
+  for (I = 0; gPciNicDeviceTable[I].Name != NULL; I++) {
+    if (gPciNicDeviceTable[I].VendorId == VendorId &&
+        gPciNicDeviceTable[I].DeviceId == DeviceId) {
+      return gPciNicDeviceTable[I].Name;
+    }
+  }
+
+  return NULL;
+}

@@ -18,6 +18,7 @@ import configparser
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -86,6 +87,61 @@ class CompanionApp:
             logger.info("Loaded config from %s", path)
 
         return defaults
+
+    def _ensure_interface_ip(self):
+        """Assign the configured IP to the interface if not already present."""
+        iface = self.config["interface"]
+        ip = self.config["local_ip"]
+        mask = self.config["subnet_mask"]
+        self._ip_was_added = False
+
+        # Check if IP is already assigned
+        try:
+            result = subprocess.run(
+                ["ip", "addr", "show", "dev", iface],
+                capture_output=True, text=True, timeout=5,
+            )
+            if f"inet {ip}/" in result.stdout:
+                logger.info("IP %s already assigned to %s", ip, iface)
+                return True
+        except Exception as e:
+            logger.warning("Failed to check interface: %s", e)
+
+        # Calculate CIDR prefix from subnet mask
+        prefix = sum(bin(int(x)).count("1") for x in mask.split("."))
+
+        # Bring interface up and add IP
+        logger.info("Configuring %s with %s/%d", iface, ip, prefix)
+        try:
+            subprocess.run(["ip", "link", "set", iface, "up"],
+                           check=True, timeout=5)
+            subprocess.run(["ip", "addr", "add", f"{ip}/{prefix}", "dev", iface],
+                           check=True, timeout=5)
+            self._ip_was_added = True
+            logger.info("IP %s/%d assigned to %s", ip, prefix, iface)
+            # Small delay for interface to be ready
+            time.sleep(0.5)
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error("Failed to configure interface: %s", e)
+            print(f"  [!] Failed to assign {ip}/{prefix} to {iface}")
+            print(f"  [!] Try manually: sudo ip addr add {ip}/{prefix} dev {iface}")
+            return False
+
+    def _cleanup_interface_ip(self):
+        """Remove the IP we added (if we added it)."""
+        if not getattr(self, "_ip_was_added", False):
+            return
+        iface = self.config["interface"]
+        ip = self.config["local_ip"]
+        mask = self.config["subnet_mask"]
+        prefix = sum(bin(int(x)).count("1") for x in mask.split("."))
+        try:
+            subprocess.run(["ip", "addr", "del", f"{ip}/{prefix}", "dev", iface],
+                           timeout=5)
+            logger.info("Removed %s/%d from %s", ip, prefix, iface)
+        except Exception:
+            pass
 
     def _init_services(self):
         """Initialize all service modules."""
@@ -225,6 +281,10 @@ class CompanionApp:
         print(f"  Control   : UDP port {self.config['control_port']}")
         print(f"  {'=' * 56}\n")
 
+        if not self._ensure_interface_ip():
+            print("  [!] Cannot continue without interface IP. Exiting.")
+            return
+
         self._init_services()
         self._start_services()
 
@@ -261,6 +321,7 @@ class CompanionApp:
             logger.info("Shutting down...")
             self.control.stop()
             self._stop_services()
+            self._cleanup_interface_ip()
             print("\n  [*] DDTSoft Test Companion stopped.")
 
 

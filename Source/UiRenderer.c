@@ -7,6 +7,93 @@
 #include <UiRenderer.h>
 
 /**
+  Try to set the best (widest) console mode available.
+  Iterates all modes and picks the one with the most columns.
+**/
+VOID
+UiSetBestConsoleMode (
+  VOID
+  )
+{
+  EFI_STATUS  Status;
+  UINTN       MaxMode;
+  UINTN       Mode;
+  UINTN       Cols;
+  UINTN       Rows;
+  UINTN       BestMode;
+  UINTN       BestCols;
+  UINTN       BestRows;
+
+  MaxMode  = (UINTN)gST->ConOut->Mode->MaxMode;
+  BestMode = (UINTN)gST->ConOut->Mode->Mode;
+  BestCols = 80;
+  BestRows = 25;
+
+  for (Mode = 0; Mode < MaxMode; Mode++) {
+    Status = gST->ConOut->QueryMode (gST->ConOut, Mode, &Cols, &Rows);
+    if (!EFI_ERROR (Status)) {
+      //
+      // Prefer wider modes; among equal width, prefer taller
+      //
+      if (Cols > BestCols || (Cols == BestCols && Rows > BestRows)) {
+        BestMode = Mode;
+        BestCols = Cols;
+        BestRows = Rows;
+      }
+    }
+  }
+
+  if (BestMode != (UINTN)gST->ConOut->Mode->Mode) {
+    gST->ConOut->SetMode (gST->ConOut, BestMode);
+  }
+}
+
+/**
+  Get the current screen width (columns).
+
+  @return  Number of columns.
+**/
+UINTN
+UiGetScreenWidth (
+  VOID
+  )
+{
+  UINTN  Cols;
+  UINTN  Rows;
+
+  gST->ConOut->QueryMode (gST->ConOut, gST->ConOut->Mode->Mode, &Cols, &Rows);
+  return Cols;
+}
+
+/**
+  Get the current screen height (rows).
+
+  @return  Number of rows.
+**/
+UINTN
+UiGetScreenHeight (
+  VOID
+  )
+{
+  UINTN  Cols;
+  UINTN  Rows;
+
+  gST->ConOut->QueryMode (gST->ConOut, gST->ConOut->Mode->Mode, &Cols, &Rows);
+  return Rows;
+}
+
+/**
+  Hide the text cursor to reduce visual noise during screen updates.
+**/
+VOID
+UiHideCursor (
+  VOID
+  )
+{
+  gST->ConOut->EnableCursor (gST->ConOut, FALSE);
+}
+
+/**
   Clear the screen and set background color.
 **/
 VOID
@@ -16,6 +103,50 @@ UiClearScreen (
 {
   gST->ConOut->SetAttribute (gST->ConOut, EFI_TEXT_ATTR (COLOR_DEFAULT, COLOR_BG));
   gST->ConOut->ClearScreen (gST->ConOut);
+}
+
+/**
+  Clear specific rows by overwriting with spaces.
+  This avoids the full-screen flash that ClearScreen causes.
+
+  @param[in]  StartRow  First row to clear (inclusive).
+  @param[in]  EndRow    Last row to clear (inclusive).
+**/
+VOID
+UiClearLines (
+  IN UINTN  StartRow,
+  IN UINTN  EndRow
+  )
+{
+  UINTN   Cols;
+  UINTN   Rows;
+  UINTN   Row;
+  UINTN   I;
+  CHAR16  BlankBuf[256];
+
+  gST->ConOut->QueryMode (gST->ConOut, gST->ConOut->Mode->Mode, &Cols, &Rows);
+
+  if (EndRow >= Rows) {
+    EndRow = Rows - 1;
+  }
+
+  //
+  // Build a blank line buffer (up to 255 columns)
+  //
+  if (Cols > 255) {
+    Cols = 255;
+  }
+  for (I = 0; I < Cols; I++) {
+    BlankBuf[I] = L' ';
+  }
+  BlankBuf[Cols] = L'\0';
+
+  gST->ConOut->SetAttribute (gST->ConOut, EFI_TEXT_ATTR (COLOR_DEFAULT, COLOR_BG));
+
+  for (Row = StartRow; Row <= EndRow; Row++) {
+    gST->ConOut->SetCursorPosition (gST->ConOut, 0, Row);
+    Print (L"%s", BlankBuf);
+  }
 }
 
 /**
@@ -53,6 +184,7 @@ UiResetColor (
   @param[in]  ...  Variable arguments.
 **/
 VOID
+EFIAPI
 UiPrintAt (
   IN UINTN          Col,
   IN UINTN          Row,
@@ -153,8 +285,15 @@ UiDrawHeader (
   VOID
   )
 {
+  UINTN  Width;
+
+  Width = UiGetScreenWidth () - 2;
+  if (Width < 60) {
+    Width = 60;
+  }
+
   UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 0, UI_BOX_WIDTH, 3, NULL);
+  UiDrawBox (1, 0, Width, 3, NULL);
   UiPrintAt (3, 1, L" DDTSoft - EFI Network Test & OSI Analyzer v1.0.0");
   UiResetColor ();
 }
@@ -175,16 +314,21 @@ UiDrawMenu (
 {
   UINTN  I;
   UINTN  StartRow;
+  UINTN  Width;
 
   StartRow = 4;
+  Width = UiGetScreenWidth () - 2;
+  if (Width < 60) {
+    Width = 60;
+  }
 
   UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, StartRow - 1, UI_BOX_WIDTH, Count + 4, NULL);
+  UiDrawBox (1, StartRow - 1, Width, Count + 4, NULL);
 
   //
   // Draw separator after header box connects to menu box
   //
-  UiDrawSeparator (1, StartRow - 1, UI_BOX_WIDTH);
+  UiDrawSeparator (1, StartRow - 1, Width);
 
   for (I = 0; I < Count; I++) {
     gST->ConOut->SetCursorPosition (gST->ConOut, 3, StartRow + I + 1);

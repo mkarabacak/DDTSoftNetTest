@@ -8,6 +8,8 @@
 #include <OsiLayers.h>
 #include <TestCases.h>
 #include <PacketDefs.h>
+#include <Protocol/Arp.h>
+#include <Protocol/ServiceBinding.h>
 
 /**
   Test L2.1: MAC Address Valid
@@ -103,12 +105,196 @@ TestL2MacAddressValid (
 }
 
 /**
+  Resolve an IP address to MAC via EFI_ARP_PROTOCOL.
+  Creates a child ARP instance, configures it, and sends a request.
+  This works correctly even when the IP4 stack is active (which
+  consumes raw ARP frames from SNP.Receive).
+
+  @param[in]  NicHandle  The NIC handle with ARP service binding.
+  @param[in]  LocalIp    Our IPv4 address (4 bytes).
+  @param[in]  TargetIp   Target IPv4 address to resolve (4 bytes).
+  @param[out] ReplyMac   Buffer to receive resolved MAC (6 bytes).
+
+  @retval TRUE   ARP resolved, ReplyMac is filled.
+  @retval FALSE  ARP resolution failed.
+**/
+STATIC
+BOOLEAN
+TryArpViaProtocol (
+  IN  EFI_HANDLE   NicHandle,
+  IN  CONST UINT8  *LocalIp,
+  IN  CONST UINT8  *TargetIp,
+  OUT UINT8        *ReplyMac
+  )
+{
+  EFI_STATUS                       Status;
+  EFI_SERVICE_BINDING_PROTOCOL     *ArpSb;
+  EFI_ARP_PROTOCOL                 *Arp;
+  EFI_HANDLE                       ArpChild;
+  EFI_ARP_CONFIG_DATA              ArpConfig;
+  EFI_IPv4_ADDRESS                 StationAddr;
+  EFI_MAC_ADDRESS                  ResolvedAddr;
+
+  ArpSb    = NULL;
+  Arp      = NULL;
+  ArpChild = NULL;
+
+  //
+  // Open ARP Service Binding on the NIC handle
+  //
+  Status = gBS->OpenProtocol (
+                  NicHandle,
+                  &gEfiArpServiceBindingProtocolGuid,
+                  (VOID **)&ArpSb,
+                  gImageHandle,
+                  NicHandle,
+                  EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                  );
+  if (EFI_ERROR (Status) || ArpSb == NULL) {
+    return FALSE;
+  }
+
+  //
+  // Create ARP child instance
+  //
+  Status = ArpSb->CreateChild (ArpSb, &ArpChild);
+  if (EFI_ERROR (Status) || ArpChild == NULL) {
+    return FALSE;
+  }
+
+  //
+  // Open ARP protocol on the child handle
+  //
+  Status = gBS->OpenProtocol (
+                  ArpChild,
+                  &gEfiArpProtocolGuid,
+                  (VOID **)&Arp,
+                  gImageHandle,
+                  NicHandle,
+                  EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                  );
+  if (EFI_ERROR (Status) || Arp == NULL) {
+    ArpSb->DestroyChild (ArpSb, ArpChild);
+    return FALSE;
+  }
+
+  //
+  // Configure ARP instance with our IP
+  //
+  CopyMem (&StationAddr, LocalIp, 4);
+
+  ZeroMem (&ArpConfig, sizeof (ArpConfig));
+  ArpConfig.SwAddressType   = 0x0800;    // IPv4
+  ArpConfig.SwAddressLength = 4;
+  ArpConfig.StationAddress  = &StationAddr;
+  ArpConfig.EntryTimeOut    = 0;         // No cache timeout
+  ArpConfig.RetryCount      = 3;
+  ArpConfig.RetryTimeOut    = 10000000;  // 1 second (100ns units)
+
+  Status = Arp->Configure (Arp, &ArpConfig);
+  if (EFI_ERROR (Status)) {
+    ArpSb->DestroyChild (ArpSb, ArpChild);
+    return FALSE;
+  }
+
+  //
+  // Send ARP request (synchronous — blocks until reply or timeout)
+  //
+  ZeroMem (&ResolvedAddr, sizeof (ResolvedAddr));
+
+  Status = Arp->Request (
+                  Arp,
+                  (VOID *)TargetIp,
+                  NULL,               // Blocking (no event)
+                  &ResolvedAddr
+                  );
+
+  if (!EFI_ERROR (Status)) {
+    CopyMem (ReplyMac, &ResolvedAddr, 6);
+  }
+
+  //
+  // Cleanup
+  //
+  Arp->Configure (Arp, NULL);  // Unconfigure
+  ArpSb->DestroyChild (ArpSb, ArpChild);
+
+  return !EFI_ERROR (Status);
+}
+
+/**
+  Fallback: try ARP resolution via raw SNP TX/RX.
+  Used when EFI_ARP_PROTOCOL is not available.
+
+  @param[in]  Snp       Initialized SNP protocol.
+  @param[in]  SrcMac    Source MAC address.
+  @param[in]  SrcIp     Source IP address (4 bytes).
+  @param[in]  DstIp     Target IP address (4 bytes).
+  @param[out] ReplyMac  Buffer to receive the reply MAC (6 bytes).
+  @param[in]  TimeoutMs Timeout in milliseconds.
+
+  @retval TRUE   ARP reply received, ReplyMac is filled.
+  @retval FALSE  No reply within timeout.
+**/
+STATIC
+BOOLEAN
+TryArpViaSnp (
+  IN  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp,
+  IN  CONST UINT8                  *SrcMac,
+  IN  CONST UINT8                  *SrcIp,
+  IN  CONST UINT8                  *DstIp,
+  OUT UINT8                        *ReplyMac,
+  IN  UINTN                        TimeoutMs
+  )
+{
+  EFI_STATUS       Status;
+  UINT8            TxBuf[64];
+  UINT8            RxBuf[MAX_ETHERNET_FRAME_SIZE];
+  UINTN            TxLen;
+  UINTN            RxLen;
+  UINTN            HdrSize;
+  UINTN            I;
+  ETHERNET_HEADER  *RxEth;
+  ARP_HEADER       *RxArp;
+
+  TxLen = PktBuildArpRequest (TxBuf, SrcMac, SrcIp, DstIp);
+
+  Status = Snp->Transmit (Snp, 0, TxLen, TxBuf, NULL, NULL, NULL);
+  if (EFI_ERROR (Status)) {
+    return FALSE;
+  }
+
+  for (I = 0; I < TimeoutMs; I++) {
+    RxLen   = sizeof (RxBuf);
+    HdrSize = 0;
+    Status  = Snp->Receive (Snp, &HdrSize, &RxLen, RxBuf, NULL, NULL, NULL);
+
+    if (!EFI_ERROR (Status) && RxLen >= ETHERNET_HEADER_SIZE + ARP_HEADER_SIZE) {
+      RxEth = (ETHERNET_HEADER *)RxBuf;
+      if (NTOHS (RxEth->EtherType) == ETHERTYPE_ARP) {
+        RxArp = (ARP_HEADER *)(RxBuf + ETHERNET_HEADER_SIZE);
+        if (NTOHS (RxArp->Operation) == ARP_OP_REPLY) {
+          CopyMem (ReplyMac, RxArp->SenderMac, 6);
+          return TRUE;
+        }
+      }
+    }
+
+    gBS->Stall (1000);  // 1ms
+  }
+
+  return FALSE;
+}
+
+/**
   Test L2.2: ARP Request/Reply
-  Sends an ARP request for the target IP and waits for a reply.
-  Uses SNP raw frame TX/RX.
+  Resolves the target IP to a MAC address via ARP.
+  Uses EFI_ARP_PROTOCOL (through the UEFI network stack) as the primary
+  method. Falls back to raw SNP TX/RX if ARP protocol is not available.
 
   PASS: ARP reply received with valid MAC
-  FAIL: No reply within timeout
+  WARN: No reply (no reachable target on network)
+  FAIL: TX failed (NIC problem)
 **/
 EFI_STATUS
 TestL2ArpRequestReply (
@@ -118,16 +304,10 @@ TestL2ArpRequestReply (
   )
 {
   EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
-  EFI_STATUS                   Status;
-  UINT8                        TxBuf[64];
-  UINT8                        RxBuf[MAX_ETHERNET_FRAME_SIZE];
-  UINTN                        TxLen;
-  UINTN                        RxLen;
-  UINTN                        I;
-  UINTN                        HdrSize;
-  ETHERNET_HEADER              *RxEth;
-  ARP_HEADER                   *RxArp;
+  UINT8                        ReplyMac[6];
   CHAR16                       MacStr[20];
+  BOOLEAN                      Resolved;
+  UINT8                        *ResolvedIp;
 
   Snp = Nic->Snp;
   if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
@@ -137,84 +317,115 @@ TestL2ArpRequestReply (
     return EFI_SUCCESS;
   }
 
-  //
-  // Build ARP request
-  //
-  TxLen = PktBuildArpRequest (
-            TxBuf,
-            Snp->Mode->CurrentAddress.Addr,
-            Config->LocalIp.Addr,
-            Config->TargetIp.Addr
-            );
+  Resolved   = FALSE;
+  ResolvedIp = NULL;
 
   //
-  // Enable broadcast receive filter
+  // Method 1: Use EFI_ARP_PROTOCOL (works even when IP4 stack is active)
   //
-  Snp->ReceiveFilters (
-    Snp,
-    EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
-    EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST,
-    0, FALSE, 0, NULL
-    );
-
-  //
-  // Send ARP request
-  //
-  Status = Snp->Transmit (Snp, ETHERNET_HEADER_SIZE, TxLen, TxBuf, NULL, NULL, NULL);
-  if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_FAIL;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"ARP request TX failed: %r", Status);
-    return EFI_SUCCESS;
-  }
-
-  Result->PacketsSent = 1;
-  Result->BytesSent   = TxLen;
-
-  //
-  // Wait for ARP reply (poll for up to 3 seconds)
-  //
-  for (I = 0; I < 3000; I++) {
-    RxLen   = sizeof (RxBuf);
-    HdrSize = 0;
-    Status  = Snp->Receive (Snp, &HdrSize, &RxLen, RxBuf, NULL, NULL, NULL);
-
-    if (!EFI_ERROR (Status) && RxLen >= ETHERNET_HEADER_SIZE + ARP_HEADER_SIZE) {
-      RxEth = (ETHERNET_HEADER *)RxBuf;
-
-      if (NTOHS (RxEth->EtherType) == ETHERTYPE_ARP) {
-        RxArp = (ARP_HEADER *)(RxBuf + ETHERNET_HEADER_SIZE);
-
-        if (NTOHS (RxArp->Operation) == ARP_OP_REPLY) {
-          Result->PacketsReceived = 1;
-          Result->BytesReceived   = RxLen;
-
-          UtilFormatMac (RxArp->SenderMac, MacStr);
-          Result->StatusCode = TEST_RESULT_PASS;
-          UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                         L"ARP reply received: %s", MacStr);
-          UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
-                         L"Target %d.%d.%d.%d resolved to %s",
-                         Config->TargetIp.Addr[0], Config->TargetIp.Addr[1],
-                         Config->TargetIp.Addr[2], Config->TargetIp.Addr[3],
-                         MacStr);
-          return EFI_SUCCESS;
-        }
+  if (Nic->HasArp) {
+    //
+    // Try gateway first
+    //
+    if (Nic->Gateway.Addr[0] != 0 || Nic->Gateway.Addr[1] != 0 ||
+        Nic->Gateway.Addr[2] != 0 || Nic->Gateway.Addr[3] != 0) {
+      Resolved = TryArpViaProtocol (
+                   Nic->Handle, Config->LocalIp.Addr,
+                   Nic->Gateway.Addr, ReplyMac
+                   );
+      if (Resolved) {
+        ResolvedIp = Nic->Gateway.Addr;
       }
     }
 
-    gBS->Stall (1000);  // 1ms
+    //
+    // Try target IP
+    //
+    if (!Resolved && (Config->TargetIp.Addr[0] != 0 || Config->TargetIp.Addr[1] != 0 ||
+                      Config->TargetIp.Addr[2] != 0 || Config->TargetIp.Addr[3] != 0)) {
+      Resolved = TryArpViaProtocol (
+                   Nic->Handle, Config->LocalIp.Addr,
+                   Config->TargetIp.Addr, ReplyMac
+                   );
+      if (Resolved) {
+        ResolvedIp = Config->TargetIp.Addr;
+      }
+    }
+
+    //
+    // Try config gateway
+    //
+    if (!Resolved && (Config->Gateway.Addr[0] != 0 || Config->Gateway.Addr[1] != 0 ||
+                      Config->Gateway.Addr[2] != 0 || Config->Gateway.Addr[3] != 0)) {
+      Resolved = TryArpViaProtocol (
+                   Nic->Handle, Config->LocalIp.Addr,
+                   Config->Gateway.Addr, ReplyMac
+                   );
+      if (Resolved) {
+        ResolvedIp = Config->Gateway.Addr;
+      }
+    }
   }
 
-  Result->StatusCode = TEST_RESULT_FAIL;
-  UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                 L"No ARP reply received within 3s");
-  UnicodeSPrint (Result->FailReason, sizeof (Result->FailReason),
-                 L"Target %d.%d.%d.%d did not respond to ARP",
-                 Config->TargetIp.Addr[0], Config->TargetIp.Addr[1],
-                 Config->TargetIp.Addr[2], Config->TargetIp.Addr[3]);
-  UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
-                 L"Verify target is on the same subnet and reachable");
+  //
+  // Method 2: Raw SNP fallback (when ARP protocol not available)
+  //
+  if (!Resolved) {
+    Snp->ReceiveFilters (
+      Snp,
+      EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
+      EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST,
+      0, FALSE, 0, NULL
+      );
+
+    if (Nic->Gateway.Addr[0] != 0 || Nic->Gateway.Addr[1] != 0 ||
+        Nic->Gateway.Addr[2] != 0 || Nic->Gateway.Addr[3] != 0) {
+      Resolved = TryArpViaSnp (
+                   Snp, Snp->Mode->CurrentAddress.Addr,
+                   Config->LocalIp.Addr, Nic->Gateway.Addr,
+                   ReplyMac, 2000
+                   );
+      if (Resolved) {
+        ResolvedIp = Nic->Gateway.Addr;
+      }
+    }
+
+    if (!Resolved && (Config->TargetIp.Addr[0] != 0 || Config->TargetIp.Addr[1] != 0 ||
+                      Config->TargetIp.Addr[2] != 0 || Config->TargetIp.Addr[3] != 0)) {
+      Resolved = TryArpViaSnp (
+                   Snp, Snp->Mode->CurrentAddress.Addr,
+                   Config->LocalIp.Addr, Config->TargetIp.Addr,
+                   ReplyMac, 2000
+                   );
+      if (Resolved) {
+        ResolvedIp = Config->TargetIp.Addr;
+      }
+    }
+  }
+
+  Result->PacketsSent = 1;
+
+  if (Resolved) {
+    Result->PacketsReceived = 1;
+    UtilFormatMac (ReplyMac, MacStr);
+    Result->StatusCode = TEST_RESULT_PASS;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"ARP reply received: %s", MacStr);
+    UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
+                   L"%d.%d.%d.%d resolved to %s",
+                   ResolvedIp[0], ResolvedIp[1],
+                   ResolvedIp[2], ResolvedIp[3],
+                   MacStr);
+  } else {
+    Result->StatusCode = TEST_RESULT_WARN;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"No ARP reply from gateway or target");
+    UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
+                   L"ARP requests sent via %s but no host responded",
+                   Nic->HasArp ? L"ARP protocol" : L"raw SNP");
+    UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
+                   L"Verify companion/target is on the same subnet");
+  }
 
   return EFI_SUCCESS;
 }
@@ -294,9 +505,9 @@ TestL2BroadcastFrame (
   }
 
   //
-  // Transmit
+  // Transmit — HeaderSize=0 because frame header is pre-built.
   //
-  Status = Snp->Transmit (Snp, ETHERNET_HEADER_SIZE, sizeof (Frame), Frame, NULL, NULL, NULL);
+  Status = Snp->Transmit (Snp, 0, sizeof (Frame), Frame, NULL, NULL, NULL);
   if (EFI_ERROR (Status)) {
     Result->StatusCode = TEST_RESULT_FAIL;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
@@ -378,7 +589,7 @@ TestL2FrameTxRx (
             Config->TargetIp.Addr
             );
 
-  Status = Snp->Transmit (Snp, ETHERNET_HEADER_SIZE, TxLen, TxBuf, NULL, NULL, NULL);
+  Status = Snp->Transmit (Snp, 0, TxLen, TxBuf, NULL, NULL, NULL);
   if (EFI_ERROR (Status)) {
     Result->StatusCode = TEST_RESULT_FAIL;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
@@ -484,7 +695,7 @@ TestL2MtuDetection (
   // Try sending the max-size frame
   //
   LargestSent = 0;
-  Status = Snp->Transmit (Snp, ETHERNET_HEADER_SIZE, FrameSize, Frame, NULL, NULL, NULL);
+  Status = Snp->Transmit (Snp, 0, FrameSize, Frame, NULL, NULL, NULL);
   if (!EFI_ERROR (Status)) {
     LargestSent = FrameSize;
     Result->PacketsSent = 1;

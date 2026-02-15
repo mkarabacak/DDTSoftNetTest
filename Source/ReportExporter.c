@@ -300,7 +300,7 @@ ReportExportTxt (
   UtilFormatIpv4 (Ctx->Config->TargetIp.Addr, IpStr);
   UnicodeSPrint (Line, sizeof (Line), L"  Target IP: %s", IpStr);
   ReportWriteLine (FileHandle, Line);
-  UnicodeSPrint (Line, sizeof (Line), L"  Timeout:   %d ms", Ctx->Config->TimeoutMs);
+  UnicodeSPrint (Line, sizeof (Line), L"  Timeout:   %d ms", (int)Ctx->Config->TimeoutMs);
   ReportWriteLine (FileHandle, Line);
   UnicodeSPrint (Line, sizeof (Line), L"  Layer:     %s", RegGetLayerName (Ctx->Layer));
   ReportWriteLine (FileHandle, Line);
@@ -315,7 +315,7 @@ ReportExportTxt (
   ReportWriteLine (FileHandle, L"--- Results Summary ---");
   UnicodeSPrint (Line, sizeof (Line),
                  L"  Total: %d  Pass: %d  Fail: %d  Warn: %d  Skip: %d  Error: %d",
-                 Ctx->ResultCount, PassCnt, FailCnt, WarnCnt, SkipCnt, ErrCnt);
+                 (int)Ctx->ResultCount, (int)PassCnt, (int)FailCnt, (int)WarnCnt, (int)SkipCnt, (int)ErrCnt);
   ReportWriteLine (FileHandle, Line);
   ReportWriteLine (FileHandle, L"");
 
@@ -330,7 +330,7 @@ ReportExportTxt (
     UnicodeSPrint (
       Line, sizeof (Line),
       L"  %2d  %-5s  %-6s  %5llu ms  %s",
-      I + 1,
+      (int)(I + 1),
       RegGetLayerShort (Ctx->TestDefs[I]->Layer),
       ReportResultStr (Ctx->Results[I].StatusCode),
       Ctx->Results[I].DurationMs,
@@ -410,7 +410,7 @@ ReportExportCsv (
       L"%d,\"%s\",\"%s\",\"%s\",\"%s\",%llu,"
       L"\"%s\",%llu,%llu,%llu,%llu,"
       L"%d,%d,%d,%d",
-      I + 1,
+      (int)(I + 1),
       Ctx->TestDefs[I]->Name,
       RegGetLayerShort (Ctx->TestDefs[I]->Layer),
       RegGetTypeName (Ctx->TestDefs[I]->Type),
@@ -421,10 +421,10 @@ ReportExportCsv (
       Ctx->Results[I].PacketsReceived,
       Ctx->Results[I].BytesSent,
       Ctx->Results[I].BytesReceived,
-      Ctx->Results[I].RttMinUs,
-      Ctx->Results[I].RttAvgUs,
-      Ctx->Results[I].RttMaxUs,
-      Ctx->Results[I].RttJitterUs
+      (int)Ctx->Results[I].RttMinUs,
+      (int)Ctx->Results[I].RttAvgUs,
+      (int)Ctx->Results[I].RttMaxUs,
+      (int)Ctx->Results[I].RttJitterUs
       );
     ReportWriteLine (FileHandle, Line);
   }
@@ -483,7 +483,7 @@ ReportExportDetailed (
   ReportWriteLine (FileHandle, Line);
   UnicodeSPrint (Line, sizeof (Line), L"Test Scope     : %s", RegGetLayerName (Ctx->Layer));
   ReportWriteLine (FileHandle, Line);
-  UnicodeSPrint (Line, sizeof (Line), L"Total Tests    : %d", Ctx->ResultCount);
+  UnicodeSPrint (Line, sizeof (Line), L"Total Tests    : %d", (int)Ctx->ResultCount);
   ReportWriteLine (FileHandle, Line);
   ReportWriteLine (FileHandle, L"");
 
@@ -511,7 +511,7 @@ ReportExportDetailed (
   ReportWriteLine (FileHandle, Line);
 
   UnicodeSPrint (Line, sizeof (Line), L"  Max Packet Size : %d bytes",
-                 Ctx->Nic->MaxPacketSize);
+                 (int)Ctx->Nic->MaxPacketSize);
   ReportWriteLine (FileHandle, Line);
 
   if (Ctx->Nic->HasIpConfig) {
@@ -562,11 +562,11 @@ ReportExportDetailed (
   UtilFormatIpv4 (Ctx->Config->TargetIp.Addr, IpStr);
   UnicodeSPrint (Line, sizeof (Line), L"  Target IP       : %s", IpStr);
   ReportWriteLine (FileHandle, Line);
-  UnicodeSPrint (Line, sizeof (Line), L"  Target Port     : %d", Ctx->Config->TargetPort);
+  UnicodeSPrint (Line, sizeof (Line), L"  Target Port     : %d", (int)Ctx->Config->TargetPort);
   ReportWriteLine (FileHandle, Line);
-  UnicodeSPrint (Line, sizeof (Line), L"  Timeout         : %d ms", Ctx->Config->TimeoutMs);
+  UnicodeSPrint (Line, sizeof (Line), L"  Timeout         : %d ms", (int)Ctx->Config->TimeoutMs);
   ReportWriteLine (FileHandle, Line);
-  UnicodeSPrint (Line, sizeof (Line), L"  Iterations      : %d", Ctx->Config->Iterations);
+  UnicodeSPrint (Line, sizeof (Line), L"  Iterations      : %d", (int)Ctx->Config->Iterations);
   ReportWriteLine (FileHandle, Line);
   UnicodeSPrint (Line, sizeof (Line), L"  Use Companion   : %s",
                  Ctx->Config->UseCompanion ? L"Yes" : L"No");
@@ -575,7 +575,7 @@ ReportExportDetailed (
   if (Ctx->Config->UseCompanion) {
     UtilFormatIpv4 (Ctx->Config->CompanionIp.Addr, IpStr);
     UnicodeSPrint (Line, sizeof (Line), L"  Companion IP    : %s:%d",
-                   IpStr, Ctx->Config->CompanionPort);
+                   IpStr, (int)Ctx->Config->CompanionPort);
     ReportWriteLine (FileHandle, Line);
   }
 
@@ -601,17 +601,17 @@ ReportExportDetailed (
     TotalPktRecv    += Ctx->Results[I].PacketsReceived;
   }
 
-  UnicodeSPrint (Line, sizeof (Line), L"  Total Tests     : %d", Ctx->ResultCount);
+  UnicodeSPrint (Line, sizeof (Line), L"  Total Tests     : %d", (int)Ctx->ResultCount);
   ReportWriteLine (FileHandle, Line);
-  UnicodeSPrint (Line, sizeof (Line), L"  Passed          : %d", PassCnt);
+  UnicodeSPrint (Line, sizeof (Line), L"  Passed          : %d", (int)PassCnt);
   ReportWriteLine (FileHandle, Line);
-  UnicodeSPrint (Line, sizeof (Line), L"  Failed          : %d", FailCnt);
+  UnicodeSPrint (Line, sizeof (Line), L"  Failed          : %d", (int)FailCnt);
   ReportWriteLine (FileHandle, Line);
-  UnicodeSPrint (Line, sizeof (Line), L"  Warnings        : %d", WarnCnt);
+  UnicodeSPrint (Line, sizeof (Line), L"  Warnings        : %d", (int)WarnCnt);
   ReportWriteLine (FileHandle, Line);
-  UnicodeSPrint (Line, sizeof (Line), L"  Skipped         : %d", SkipCnt);
+  UnicodeSPrint (Line, sizeof (Line), L"  Skipped         : %d", (int)SkipCnt);
   ReportWriteLine (FileHandle, Line);
-  UnicodeSPrint (Line, sizeof (Line), L"  Errors          : %d", ErrCnt);
+  UnicodeSPrint (Line, sizeof (Line), L"  Errors          : %d", (int)ErrCnt);
   ReportWriteLine (FileHandle, Line);
   UnicodeSPrint (Line, sizeof (Line), L"  Total Duration  : %llu ms", TotalDurationMs);
   ReportWriteLine (FileHandle, Line);
@@ -625,7 +625,7 @@ ReportExportDetailed (
   //
   if (Ctx->ResultCount > 0) {
     UINTN  PassRate = (PassCnt * 100) / Ctx->ResultCount;
-    UnicodeSPrint (Line, sizeof (Line), L"  Pass Rate       : %d%%", PassRate);
+    UnicodeSPrint (Line, sizeof (Line), L"  Pass Rate       : %d%%", (int)PassRate);
     ReportWriteLine (FileHandle, Line);
   }
 
@@ -643,7 +643,7 @@ ReportExportDetailed (
     ReportWriteLine (FileHandle, L"  ------------------------------------------------");
 
     UnicodeSPrint (Line, sizeof (Line), L"  Test #%d: %s",
-                   I + 1, Ctx->TestDefs[I]->Name);
+                   (int)(I + 1), Ctx->TestDefs[I]->Name);
     ReportWriteLine (FileHandle, Line);
 
     UnicodeSPrint (Line, sizeof (Line), L"  Description : %s",
@@ -722,10 +722,10 @@ ReportExportDetailed (
     if (Ctx->Results[I].RttAvgUs > 0) {
       UnicodeSPrint (Line, sizeof (Line),
                      L"  RTT (us)    : Min=%d  Avg=%d  Max=%d  Jitter=%d",
-                     Ctx->Results[I].RttMinUs,
-                     Ctx->Results[I].RttAvgUs,
-                     Ctx->Results[I].RttMaxUs,
-                     Ctx->Results[I].RttJitterUs);
+                     (int)Ctx->Results[I].RttMinUs,
+                     (int)Ctx->Results[I].RttAvgUs,
+                     (int)Ctx->Results[I].RttMaxUs,
+                     (int)Ctx->Results[I].RttJitterUs);
       ReportWriteLine (FileHandle, Line);
     }
   }
@@ -870,31 +870,102 @@ ReportRunTests (
   UINTN            TestCount;
   UINTN            I;
   UINTN            Percent;
+  UINTN            BoxW;
+  UINTN            BarW;
+  EFI_INPUT_KEY    Key;
+  EFI_STATUS       KeyStatus;
+  TEST_CONFIG      ReportConfig;
 
   TestCount = RegGetTestsByLayer (Layer, Tests, MAX_TESTS);
   *OutCount = 0;
+
+  //
+  // Use reduced timeouts for report mode to avoid long hangs.
+  // Tests that would take very long are skipped automatically.
+  //
+  CopyMem (&ReportConfig, Config, sizeof (TEST_CONFIG));
+  if (ReportConfig.TimeoutMs > 1500) {
+    ReportConfig.TimeoutMs = 1500;
+  }
+  ReportConfig.Iterations = 1;
+
+  BoxW = UiGetScreenWidth () - 2;
+  if (BoxW < 76) {
+    BoxW = 76;
+  }
+  BarW = BoxW - 8;
+
+  //
+  // Draw the static frame once before the loop
+  //
+  UiClearScreen ();
+  UiDrawHeader ();
+  UiDrawBox (1, 3, BoxW, 11, L" Generating Report ");
+
+  UiSetColor (COLOR_INFO, COLOR_BG);
+  UiPrintAt (3, 5, L"Running tests for report export...");
+  UiPrintAt (3, 6, L"NIC: %s", Nic->Name);
+
+  UiSetColor (EFI_DARKGRAY, COLOR_BG);
+  UiDrawStatusBar (L"Press [ESC] to cancel report generation");
 
   for (I = 0; I < TestCount; I++) {
     Percent = (TestCount > 0) ? ((I * 100) / TestCount) : 0;
 
     //
-    // Show progress
+    // Check for ESC key (non-blocking) to allow user to cancel
     //
-    UiClearScreen ();
-    UiDrawHeader ();
-    UiDrawBox (2, 3, 76, 10, L" Generating Report ");
-
-    UiSetColor (COLOR_INFO, COLOR_BG);
-    UiPrintAt (4, 5, L"  Running tests for report export...");
-    UiPrintAt (4, 6, L"  NIC: %s", Nic->Name);
-    UiPrintAt (4, 8, L"  Test %d/%d: %s", I + 1, TestCount, Tests[I]->Name);
-
-    UiDrawProgress (4, 10, 70, Percent, L"Progress");
+    KeyStatus = gST->ConIn->ReadKeyStroke (gST->ConIn, &Key);
+    if (!EFI_ERROR (KeyStatus) && Key.ScanCode == SCAN_ESC) {
+      //
+      // User cancelled — mark remaining tests as SKIP
+      //
+      break;
+    }
 
     //
-    // Run the test
+    // Update only the changing lines (test info + progress)
     //
-    RunSingleTest (Tests[I], Nic, Config, &OutResults[I]);
+    UiClearLines (8, 11);
+
+    UiSetColor (COLOR_DEFAULT, COLOR_BG);
+    UiPrintAt (3, 8, L"Test %d/%d: %-50s", (int)(I + 1), (int)TestCount, Tests[I]->Name);
+    UiPrintAt (3, 9, L"Layer: %s  Est: %d ms       ",
+               RegGetLayerShort (Tests[I]->Layer), (int)Tests[I]->EstimatedTimeMs);
+
+    UiDrawProgress (4, 11, BarW, Percent, L"Progress");
+
+    //
+    // SAFETY: In report mode, only run tests that are purely informational
+    // (read SNP Mode data, check NIC_INFO fields, read IP config).
+    // Skip ALL tests that perform hardware I/O (Transmit, Receive,
+    // Start/Stop/Initialize, ReceiveFilters) — these can freeze real PCs
+    // by deadlocking NIC drivers when upper protocol stacks are active.
+    //
+    // Safe criteria: EstimatedTime <= 1000ms AND !RequiresTarget AND !Stress
+    // This allows: NicStatus, LinkDetect, LinkNegotiation, MacAddressValid,
+    //              IpConfigCheck — all read-only operations.
+    //
+    if (Tests[I]->RequiresTarget ||
+        Tests[I]->EstimatedTimeMs > 1000 ||
+        Tests[I]->Type == TestTypeStress ||
+        Tests[I]->Type == TestTypePerformance) {
+      ZeroMem (&OutResults[I], sizeof (TEST_RESULT_DATA));
+      OutResults[I].StatusCode = TEST_RESULT_SKIP;
+      UnicodeSPrint (
+        OutResults[I].Summary,
+        sizeof (OutResults[I].Summary),
+        L"Skipped in report mode — run from [T] Run Tests for full results"
+        );
+      OutTestDefs[I] = Tests[I];
+      (*OutCount)++;
+      continue;
+    }
+
+    //
+    // Run safe (read-only) test with reduced timeout config
+    //
+    RunSingleTest (Tests[I], Nic, &ReportConfig, &OutResults[I]);
     OutTestDefs[I] = Tests[I];
     (*OutCount)++;
   }
@@ -917,24 +988,30 @@ ReportDoExport (
   REPORT_FORMAT   Format;
   CHAR16          Filename[REPORT_MAX_FILENAME];
   EFI_STATUS      Status;
+  UINTN           BoxW;
+
+  BoxW = UiGetScreenWidth () - 2;
+  if (BoxW < 76) {
+    BoxW = 76;
+  }
 
   //
   // Format selection menu
   //
   UiClearScreen ();
   UiDrawHeader ();
-  UiDrawBox (2, 3, 76, 12, L" Export Format ");
+  UiDrawBox (1, 3, BoxW, 12, L" Export Format ");
 
   UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (6, 5, L"Tests completed: %d results ready to export", Ctx->ResultCount);
+  UiPrintAt (5, 5, L"Tests completed: %d results ready to export", (int)Ctx->ResultCount);
 
   UiSetColor (COLOR_DEFAULT, COLOR_BG);
-  UiPrintAt (6, 7,  L"[1] TXT        - Plain text summary report");
-  UiPrintAt (6, 8,  L"[2] CSV        - Spreadsheet-compatible data");
-  UiPrintAt (6, 9,  L"[3] Detailed   - Verbose report with full diagnostics");
-  UiPrintAt (6, 10, L"[4] Binary     - Raw binary data dump");
+  UiPrintAt (5, 7,  L"[1] TXT        - Plain text summary report");
+  UiPrintAt (5, 8,  L"[2] CSV        - Spreadsheet-compatible data");
+  UiPrintAt (5, 9,  L"[3] Detailed   - Verbose report with full diagnostics");
+  UiPrintAt (5, 10, L"[4] Binary     - Raw binary data dump");
 
-  UiPrintAt (6, 12, L"[Q] Cancel");
+  UiPrintAt (5, 12, L"[Q] Cancel");
 
   UiDrawStatusBar (L"Select format [1-4] or [Q] to cancel");
 
@@ -958,11 +1035,11 @@ ReportDoExport (
   //
   UiClearScreen ();
   UiDrawHeader ();
-  UiDrawBox (2, 3, 76, 8, L" Exporting Report ");
+  UiDrawBox (1, 3, BoxW, 8, L" Exporting Report ");
 
   UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (4, 5, L"  Writing: %s", Filename);
-  UiPrintAt (4, 6, L"  Please wait...");
+  UiPrintAt (3, 5, L"  Writing: %s", Filename);
+  UiPrintAt (3, 6, L"  Please wait...");
 
   //
   // Export
@@ -990,10 +1067,10 @@ ReportDoExport (
   //
   if (!EFI_ERROR (Status)) {
     UiSetColor (COLOR_SUCCESS, COLOR_BG);
-    UiPrintAt (4, 8, L"  Report saved successfully: %s", Filename);
+    UiPrintAt (3, 8, L"  Report saved successfully: %s", Filename);
   } else {
     UiSetColor (COLOR_ERROR, COLOR_BG);
-    UiPrintAt (4, 8, L"  Failed to save report: %r", Status);
+    UiPrintAt (3, 8, L"  Failed to save report: %r", Status);
   }
 
   UiDrawStatusBar (L"Press any key to continue...");
@@ -1026,6 +1103,7 @@ ShowReports (
   UINTN             ResultCount;
   REPORT_CONTEXT    Ctx;
   CHAR16            IpStr[20];
+  UINTN             BoxW;
 
   //
   // Initialize test registry
@@ -1095,19 +1173,29 @@ ShowReports (
   ResultCount   = 0;
   Running       = TRUE;
 
+  BoxW = UiGetScreenWidth () - 2;
+  if (BoxW < 76) {
+    BoxW = 76;
+  }
+
+  //
+  // Initial full draw
+  //
+  UiClearScreen ();
+  UiDrawHeader ();
+
   while (Running) {
     //
-    // Report menu
+    // Report menu — clear only content area, keep header stable
     //
-    UiClearScreen ();
-    UiDrawHeader ();
+    UiClearLines (3, UiGetScreenHeight () - 2);
 
     UiSetColor (COLOR_HEADER, COLOR_BG);
-    UiDrawBox (1, 3, 76, 5, L"Reports");
+    UiDrawBox (1, 3, BoxW, 5, L"Reports");
 
     UiSetColor (COLOR_INFO, COLOR_BG);
     UiPrintAt (3, 4, L"  NIC       : [%d] %s",
-               SelectedNic + 1, Nics[SelectedNic].Name);
+               (int)(SelectedNic + 1), Nics[SelectedNic].Name);
 
     if (Nics[SelectedNic].HasIpConfig) {
       UtilFormatIpv4 (Nics[SelectedNic].Ipv4Address.Addr, IpStr);
@@ -1118,13 +1206,13 @@ ShowReports (
 
     UtilFormatIpv4 (Config.TargetIp.Addr, IpStr);
     UiPrintAt (3, 6, L"  Target IP : %s", IpStr);
-    UiPrintAt (3, 7, L"  Tests     : %d registered", RegGetTestCount ());
+    UiPrintAt (3, 7, L"  Tests     : %d registered", (int)RegGetTestCount ());
 
     //
     // Report type selection
     //
     UiSetColor (COLOR_HEADER, COLOR_BG);
-    UiDrawBox (1, 9, 76, 13, L"Select Report Type");
+    UiDrawBox (1, 9, BoxW, 13, L"Select Report Type");
 
     UiSetColor (COLOR_DEFAULT, COLOR_BG);
     UiPrintAt (5, 10, L"[1] Quick Scan Report   - Run QuickScan + export results");
@@ -1134,7 +1222,7 @@ ShowReports (
     UiPrintAt (5, 14, L"[5] Layer 4 Report      - Transport layer tests");
     UiPrintAt (5, 15, L"[6] Layer 7 Report      - Application layer tests");
     UiPrintAt (5, 16, L"[7] Full Report         - All layers (%d tests)",
-               RegGetTestCount ());
+               (int)RegGetTestCount ());
 
     UiSetColor (EFI_DARKGRAY, COLOR_BG);
     UiPrintAt (5, 18, L"[N] Change NIC  [T] Change Target IP");

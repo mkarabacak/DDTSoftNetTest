@@ -29,11 +29,40 @@
 #define PROGRESS_EMPTY   L'\x2591'   // light shade
 
 //
+// Console mode and dimensions
+//
+VOID
+UiSetBestConsoleMode (
+  VOID
+  );
+
+UINTN
+UiGetScreenWidth (
+  VOID
+  );
+
+UINTN
+UiGetScreenHeight (
+  VOID
+  );
+
+//
 // Screen management
 //
 VOID
 UiClearScreen (
   VOID
+  );
+
+VOID
+UiHideCursor (
+  VOID
+  );
+
+VOID
+UiClearLines (
+  IN UINTN  StartRow,
+  IN UINTN  EndRow
   );
 
 VOID
@@ -51,6 +80,7 @@ UiResetColor (
 // Positioning and printing
 //
 VOID
+EFIAPI
 UiPrintAt (
   IN UINTN          Col,
   IN UINTN          Row,

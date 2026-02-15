@@ -19,6 +19,11 @@ export PACKAGES_PATH="$EDK2_DIR:$DDTSOFT_DIR"
 echo "=== Building DDTSoftNetTest ==="
 build -a X64 -t GCC5 -p DDTSoftNetTest/DDTSoftNetTest.dsc -b DEBUG
 
+RELEASE_DIR="$DDTSOFT_DIR/DDTSoftNetTest/Release"
+mkdir -p "$RELEASE_DIR"
+cp Build/DDTSoftNetTest/DEBUG_GCC5/X64/DDTSoftNetTest.efi "$RELEASE_DIR/"
+echo "=== Release updated ==="
+
 echo "=== Creating EFI disk image ==="
 dd if=/dev/zero of="$EFI_IMG" bs=1M count=64 2>/dev/null
 mkfs.vfat -F 32 "$EFI_IMG" >/dev/null

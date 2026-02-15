@@ -129,9 +129,9 @@ RegInitAllTests (
 
   RegAdd (
     L"ARP Request/Reply",
-    L"Send ARP request and verify reply from target",
-    OsiLayerDataLink, TestTypeConnectivity, 3000,
-    TRUE, TRUE, FALSE, FALSE, FALSE, FALSE,
+    L"Send ARP request and verify reply (gateway/target)",
+    OsiLayerDataLink, TestTypeConnectivity, 7000,
+    FALSE, TRUE, FALSE, FALSE, FALSE, FALSE,
     TestL2ArpRequestReply
     );
 
