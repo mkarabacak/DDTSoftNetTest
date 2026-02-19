@@ -138,6 +138,29 @@ typedef struct {
 } NIC_INFO;
 
 //
+// PCI NIC information (includes driver-less NICs)
+//
+#define MAX_PCI_NICS  16
+
+typedef struct {
+  UINTN              Index;
+  EFI_HANDLE         Handle;         // PCI IO handle
+  UINT16             VendorId;
+  UINT16             DeviceId;
+  UINT8              Bus;
+  UINT8              Dev;
+  UINT8              Func;
+  CHAR16             VendorName[32];
+  CHAR16             DeviceModel[48];
+  BOOLEAN            HasDriver;      // PCI IO opened BY_DRIVER
+  BOOLEAN            HasMac;         // MAC address available
+  UINT8              MacAddress[6];
+  BOOLEAN            MediaPresent;
+  UINTN              SnpIndex;       // Index into NIC_INFO array if matched
+  BOOLEAN            MatchedSnp;     // TRUE if matched to an SNP NIC
+} PCI_NIC_INFO;
+
+//
 // Menu item structure
 //
 typedef struct {
@@ -159,7 +182,6 @@ DDTSoftNetTestMain (
 //
 // Forward declarations - Modules
 //
-EFI_STATUS ShowSystemInfo (VOID);
 EFI_STATUS ShowNetworkInterfaces (VOID);
 EFI_STATUS ShowTestMenu (VOID);
 EFI_STATUS ShowPacketCapture (VOID);
@@ -193,6 +215,8 @@ typedef struct {
   EFI_HANDLE                   NicHandle;
   EFI_HANDLE                   Udp4ChildHandle;
   EFI_UDP4_PROTOCOL            *Udp4;
+  EFI_HANDLE                   MnpChildHandle;
+  EFI_MANAGED_NETWORK_PROTOCOL *Mnp;
   EFI_IPv4_ADDRESS             LocalIp;
   EFI_IPv4_ADDRESS             CompanionIp;
   EFI_IPv4_ADDRESS             SubnetMask;
@@ -206,7 +230,7 @@ typedef struct {
 // Companion message buffer size
 //
 #define COMPANION_MAX_MSG_SIZE   512
-#define COMPANION_DEFAULT_TIMEOUT 3000
+#define COMPANION_DEFAULT_TIMEOUT 5000
 
 //
 // CompanionLink functions (CompanionLink.c)

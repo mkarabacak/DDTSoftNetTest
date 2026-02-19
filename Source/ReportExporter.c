@@ -1,14 +1,14 @@
 /** @file
   Report exporter (TXT, CSV, detailed, binary).
   Provides test result export to files in multiple formats.
-  Uses ShellLib for file I/O operations.
+  Uses EFI_SIMPLE_FILE_SYSTEM_PROTOCOL for direct file I/O.
 **/
 
 #include <DDTSoftNetTest.h>
 #include <OsiLayers.h>
 #include <UiRenderer.h>
 #include <SystemInfo.h>
-#include <Library/ShellLib.h>
+#include <Guid/FileInfo.h>
 
 //
 // ============================================================
@@ -117,13 +117,79 @@ ReportBuildFilename (
 
 //
 // ============================================================
+// Static: open a file on the boot device using EFI_FILE_PROTOCOL
+// ============================================================
+//
+STATIC
+EFI_STATUS
+ReportOpenFile (
+  IN  CONST CHAR16       *Filename,
+  OUT EFI_FILE_PROTOCOL  **OutFile
+  )
+{
+  EFI_STATUS                       Status;
+  EFI_LOADED_IMAGE_PROTOCOL        *LoadedImage;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Fs;
+  EFI_FILE_PROTOCOL                *Root;
+
+  *OutFile = NULL;
+
+  //
+  // Get the device we booted from via LoadedImage
+  //
+  Status = gBS->HandleProtocol (
+                  gImageHandle,
+                  &gEfiLoadedImageProtocolGuid,
+                  (VOID **)&LoadedImage
+                  );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  //
+  // Open SimpleFileSystem on the boot device
+  //
+  Status = gBS->HandleProtocol (
+                  LoadedImage->DeviceHandle,
+                  &gEfiSimpleFileSystemProtocolGuid,
+                  (VOID **)&Fs
+                  );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  //
+  // Open the root volume
+  //
+  Status = Fs->OpenVolume (Fs, &Root);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  //
+  // Create/open the file
+  //
+  Status = Root->Open (
+                   Root,
+                   OutFile,
+                   (CHAR16 *)Filename,
+                   EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE,
+                   0
+                   );
+
+  Root->Close (Root);
+  return Status;
+}
+
+//
+// ============================================================
 // Static: write a Unicode string to file as ASCII
 // ============================================================
 //
 STATIC
 EFI_STATUS
 ReportWriteLine (
-  IN SHELL_FILE_HANDLE  FileHandle,
+  IN EFI_FILE_PROTOCOL  *FileHandle,
   IN CONST CHAR16       *Line
   )
 {
@@ -149,7 +215,7 @@ ReportWriteLine (
   AsciiBuf[Len + 1] = '\n';
   WriteSize = Len + 2;
 
-  Status = ShellWriteFile (FileHandle, &WriteSize, AsciiBuf);
+  Status = FileHandle->Write (FileHandle, &WriteSize, AsciiBuf);
   return Status;
 }
 
@@ -161,7 +227,7 @@ ReportWriteLine (
 STATIC
 EFI_STATUS
 ReportWriteRaw (
-  IN SHELL_FILE_HANDLE  FileHandle,
+  IN EFI_FILE_PROTOCOL  *FileHandle,
   IN VOID               *Data,
   IN UINTN              DataSize
   )
@@ -169,7 +235,7 @@ ReportWriteRaw (
   UINTN  WriteSize;
 
   WriteSize = DataSize;
-  return ShellWriteFile (FileHandle, &WriteSize, Data);
+  return FileHandle->Write (FileHandle, &WriteSize, Data);
 }
 
 //
@@ -231,6 +297,30 @@ ReportCountResults (
 
 //
 // ============================================================
+// Static: get memory type name from SMBIOS type code
+// ============================================================
+//
+STATIC
+CONST CHAR16 *
+ReportMemTypeName (
+  IN UINT8  MemoryType
+  )
+{
+  switch (MemoryType) {
+    case 0x12: return L"DDR";
+    case 0x13: return L"DDR2";
+    case 0x18: return L"DDR3";
+    case 0x1A: return L"DDR4";
+    case 0x1B: return L"LPDDR4";
+    case 0x1C: return L"LPDDR3";
+    case 0x22: return L"DDR5";
+    case 0x23: return L"LPDDR5";
+    default:   return L"Unknown";
+  }
+}
+
+//
+// ============================================================
 // TXT Report Export
 // ============================================================
 //
@@ -241,7 +331,7 @@ ReportExportTxt (
   IN CONST CHAR16    *Filename
   )
 {
-  SHELL_FILE_HANDLE  FileHandle;
+  EFI_FILE_PROTOCOL  *FileHandle;
   EFI_STATUS         Status;
   CHAR16             Line[REPORT_LINE_MAX];
   CHAR16             MacStr[20];
@@ -249,12 +339,7 @@ ReportExportTxt (
   UINTN              I;
   UINTN              PassCnt, FailCnt, WarnCnt, SkipCnt, ErrCnt;
 
-  Status = ShellOpenFileByName (
-             (CHAR16 *)Filename,
-             &FileHandle,
-             EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE,
-             0
-             );
+  Status = ReportOpenFile (Filename, &FileHandle);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -270,6 +355,114 @@ ReportExportTxt (
   ReportWriteLine (FileHandle, Line);
   ReportWriteLine (FileHandle, L"================================================================");
   ReportWriteLine (FileHandle, L"");
+
+  //
+  // System Information (from SMBIOS)
+  //
+  {
+    FIRMWARE_INFO  FwInfo;
+    SYSTEM_INFO    SysInfo;
+    CPU_INFO       CpuInf;
+    MEMORY_INFO    MemInfo;
+    UINTN          J;
+
+    CollectFirmwareInfo (&FwInfo);
+    CollectSystemInfo (&SysInfo);
+    CollectCpuInfo (&CpuInf);
+    CollectMemoryInfo (&MemInfo);
+
+    ReportWriteLine (FileHandle, L"--- System Information ---");
+    UnicodeSPrint (Line, sizeof (Line), L"  Manufacturer : %a", SysInfo.Manufacturer);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Product      : %a", SysInfo.ProductName);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Version      : %a", SysInfo.Version);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Serial No    : %a", SysInfo.SerialNumber);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line),
+                   L"  UUID         : %08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                   SysInfo.SystemUuid.Data1, SysInfo.SystemUuid.Data2,
+                   SysInfo.SystemUuid.Data3,
+                   SysInfo.SystemUuid.Data4[0], SysInfo.SystemUuid.Data4[1],
+                   SysInfo.SystemUuid.Data4[2], SysInfo.SystemUuid.Data4[3],
+                   SysInfo.SystemUuid.Data4[4], SysInfo.SystemUuid.Data4[5],
+                   SysInfo.SystemUuid.Data4[6], SysInfo.SystemUuid.Data4[7]);
+    ReportWriteLine (FileHandle, Line);
+    ReportWriteLine (FileHandle, L"");
+
+    ReportWriteLine (FileHandle, L"--- Board Information ---");
+    UnicodeSPrint (Line, sizeof (Line), L"  Manufacturer : %a", SysInfo.BoardManufacturer);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Product      : %a", SysInfo.BoardProduct);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Version      : %a", SysInfo.BoardVersion);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Serial No    : %a", SysInfo.BoardSerial);
+    ReportWriteLine (FileHandle, Line);
+    ReportWriteLine (FileHandle, L"");
+
+    ReportWriteLine (FileHandle, L"--- Firmware Information ---");
+    UnicodeSPrint (Line, sizeof (Line), L"  UEFI Vendor  : %s", FwInfo.FirmwareVendor);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  UEFI Spec    : %d.%d",
+                   (int)FwInfo.UefiSpecMajor, (int)FwInfo.UefiSpecMinor);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  FW Revision  : 0x%08X", FwInfo.FirmwareRevision);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  BIOS Vendor  : %a", FwInfo.BiosVendor);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  BIOS Version : %a", FwInfo.BiosVersion);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  BIOS Date    : %a", FwInfo.BiosReleaseDate);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  BIOS Release : %d.%d",
+                   (int)FwInfo.BiosMajorRelease, (int)FwInfo.BiosMinorRelease);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  BIOS ROM     : %llu KB",
+                   FwInfo.BiosRomSize / 1024);
+    ReportWriteLine (FileHandle, Line);
+    ReportWriteLine (FileHandle, L"");
+
+    ReportWriteLine (FileHandle, L"--- CPU Information ---");
+    UnicodeSPrint (Line, sizeof (Line), L"  Processor    : %a", CpuInf.ProcessorName);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Socket       : %a", CpuInf.SocketDesignation);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Max Speed    : %d MHz", (int)CpuInf.MaxSpeed);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Current Speed: %d MHz", (int)CpuInf.CurrentSpeed);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Cores        : %d", (int)CpuInf.CoreCount);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Threads      : %d", (int)CpuInf.ThreadCount);
+    ReportWriteLine (FileHandle, Line);
+    ReportWriteLine (FileHandle, L"");
+
+    ReportWriteLine (FileHandle, L"--- Memory Information ---");
+    UnicodeSPrint (Line, sizeof (Line), L"  Total Memory : %d MB (%d GB)",
+                   (int)MemInfo.TotalMemoryMB, (int)(MemInfo.TotalMemoryMB / 1024));
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Slots        : %d populated / %d total",
+                   (int)MemInfo.PopulatedSlots, (int)MemInfo.TotalSlots);
+    ReportWriteLine (FileHandle, Line);
+
+    for (J = 0; J < MemInfo.TotalSlots; J++) {
+      if (MemInfo.Slots[J].SizeMB > 0) {
+        UnicodeSPrint (Line, sizeof (Line),
+                       L"  [%a] %d MB %s @ %d MHz  %a %a",
+                       MemInfo.Slots[J].DeviceLocator,
+                       (int)MemInfo.Slots[J].SizeMB,
+                       ReportMemTypeName (MemInfo.Slots[J].MemoryType),
+                       (int)MemInfo.Slots[J].ConfiguredSpeed,
+                       MemInfo.Slots[J].Manufacturer,
+                       MemInfo.Slots[J].PartNumber);
+        ReportWriteLine (FileHandle, Line);
+      }
+    }
+
+    ReportWriteLine (FileHandle, L"");
+  }
 
   //
   // NIC info
@@ -362,7 +555,7 @@ ReportExportTxt (
   ReportWriteLine (FileHandle, L"  Report generated by DDTSoft Network Test & OSI Analyzer");
   ReportWriteLine (FileHandle, L"================================================================");
 
-  ShellCloseFile (&FileHandle);
+  FileHandle->Close (FileHandle);
   return EFI_SUCCESS;
 }
 
@@ -378,17 +571,12 @@ ReportExportCsv (
   IN CONST CHAR16    *Filename
   )
 {
-  SHELL_FILE_HANDLE  FileHandle;
+  EFI_FILE_PROTOCOL  *FileHandle;
   EFI_STATUS         Status;
   CHAR16             Line[REPORT_LINE_MAX];
   UINTN              I;
 
-  Status = ShellOpenFileByName (
-             (CHAR16 *)Filename,
-             &FileHandle,
-             EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE,
-             0
-             );
+  Status = ReportOpenFile (Filename, &FileHandle);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -429,7 +617,7 @@ ReportExportCsv (
     ReportWriteLine (FileHandle, Line);
   }
 
-  ShellCloseFile (&FileHandle);
+  FileHandle->Close (FileHandle);
   return EFI_SUCCESS;
 }
 
@@ -446,7 +634,7 @@ ReportExportDetailed (
   IN CONST CHAR16    *Filename
   )
 {
-  SHELL_FILE_HANDLE  FileHandle;
+  EFI_FILE_PROTOCOL  *FileHandle;
   EFI_STATUS         Status;
   CHAR16             Line[REPORT_LINE_MAX];
   CHAR16             MacStr[20];
@@ -456,12 +644,7 @@ ReportExportDetailed (
   UINT64             TotalDurationMs;
   UINT64             TotalPktSent, TotalPktRecv;
 
-  Status = ShellOpenFileByName (
-             (CHAR16 *)Filename,
-             &FileHandle,
-             EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE,
-             0
-             );
+  Status = ReportOpenFile (Filename, &FileHandle);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -488,10 +671,192 @@ ReportExportDetailed (
   ReportWriteLine (FileHandle, L"");
 
   //
-  // ── Section 1: NIC Details ──
+  // ── Section 1: System Information ──
+  //
+  {
+    FIRMWARE_INFO  FwInfo;
+    SYSTEM_INFO    SysInfo;
+    CPU_INFO       CpuInf;
+    MEMORY_INFO    MemInfo;
+    UINTN          Sl;
+
+    CollectFirmwareInfo (&FwInfo);
+    CollectSystemInfo (&SysInfo);
+    CollectCpuInfo (&CpuInf);
+    CollectMemoryInfo (&MemInfo);
+
+    ReportWriteLine (FileHandle, L"================================================================");
+    ReportWriteLine (FileHandle, L"  SECTION 1: SYSTEM INFORMATION");
+    ReportWriteLine (FileHandle, L"================================================================");
+    ReportWriteLine (FileHandle, L"");
+
+    ReportWriteLine (FileHandle, L"  -- System --");
+    UnicodeSPrint (Line, sizeof (Line), L"  Manufacturer    : %a", SysInfo.Manufacturer);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Product Name    : %a", SysInfo.ProductName);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Version         : %a", SysInfo.Version);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Serial Number   : %a", SysInfo.SerialNumber);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line),
+                   L"  UUID            : %08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                   SysInfo.SystemUuid.Data1, SysInfo.SystemUuid.Data2,
+                   SysInfo.SystemUuid.Data3,
+                   SysInfo.SystemUuid.Data4[0], SysInfo.SystemUuid.Data4[1],
+                   SysInfo.SystemUuid.Data4[2], SysInfo.SystemUuid.Data4[3],
+                   SysInfo.SystemUuid.Data4[4], SysInfo.SystemUuid.Data4[5],
+                   SysInfo.SystemUuid.Data4[6], SysInfo.SystemUuid.Data4[7]);
+    ReportWriteLine (FileHandle, Line);
+    ReportWriteLine (FileHandle, L"");
+
+    ReportWriteLine (FileHandle, L"  -- Baseboard --");
+    UnicodeSPrint (Line, sizeof (Line), L"  Board Mfr       : %a", SysInfo.BoardManufacturer);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Board Product   : %a", SysInfo.BoardProduct);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Board Version   : %a", SysInfo.BoardVersion);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Board Serial    : %a", SysInfo.BoardSerial);
+    ReportWriteLine (FileHandle, Line);
+    ReportWriteLine (FileHandle, L"");
+
+    ReportWriteLine (FileHandle, L"  -- Firmware --");
+    UnicodeSPrint (Line, sizeof (Line), L"  UEFI Vendor     : %s", FwInfo.FirmwareVendor);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  UEFI Spec       : %d.%d",
+                   (int)FwInfo.UefiSpecMajor, (int)FwInfo.UefiSpecMinor);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  FW Revision     : 0x%08X", FwInfo.FirmwareRevision);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  BIOS Vendor     : %a", FwInfo.BiosVendor);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  BIOS Version    : %a", FwInfo.BiosVersion);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  BIOS Date       : %a", FwInfo.BiosReleaseDate);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  BIOS Release    : %d.%d",
+                   (int)FwInfo.BiosMajorRelease, (int)FwInfo.BiosMinorRelease);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  BIOS ROM Size   : %llu KB",
+                   FwInfo.BiosRomSize / 1024);
+    ReportWriteLine (FileHandle, Line);
+    ReportWriteLine (FileHandle, L"");
+
+    ReportWriteLine (FileHandle, L"  -- Processor --");
+    UnicodeSPrint (Line, sizeof (Line), L"  Processor       : %a", CpuInf.ProcessorName);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Socket          : %a", CpuInf.SocketDesignation);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Max Speed       : %d MHz", (int)CpuInf.MaxSpeed);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Current Speed   : %d MHz", (int)CpuInf.CurrentSpeed);
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Cores / Threads : %d / %d",
+                   (int)CpuInf.CoreCount, (int)CpuInf.ThreadCount);
+    ReportWriteLine (FileHandle, Line);
+    ReportWriteLine (FileHandle, L"");
+
+    ReportWriteLine (FileHandle, L"  -- Memory --");
+    UnicodeSPrint (Line, sizeof (Line), L"  Total Memory    : %d MB (%d GB)",
+                   (int)MemInfo.TotalMemoryMB, (int)(MemInfo.TotalMemoryMB / 1024));
+    ReportWriteLine (FileHandle, Line);
+    UnicodeSPrint (Line, sizeof (Line), L"  Populated Slots : %d / %d",
+                   (int)MemInfo.PopulatedSlots, (int)MemInfo.TotalSlots);
+    ReportWriteLine (FileHandle, Line);
+    ReportWriteLine (FileHandle, L"");
+
+    for (Sl = 0; Sl < MemInfo.TotalSlots; Sl++) {
+      if (MemInfo.Slots[Sl].SizeMB > 0) {
+        UnicodeSPrint (Line, sizeof (Line),
+                       L"  Slot %-2d [%a]",
+                       (int)MemInfo.Slots[Sl].SlotIndex,
+                       MemInfo.Slots[Sl].DeviceLocator);
+        ReportWriteLine (FileHandle, Line);
+        UnicodeSPrint (Line, sizeof (Line),
+                       L"    Size: %d MB  Type: %s  Speed: %d/%d MHz",
+                       (int)MemInfo.Slots[Sl].SizeMB,
+                       ReportMemTypeName (MemInfo.Slots[Sl].MemoryType),
+                       (int)MemInfo.Slots[Sl].ConfiguredSpeed,
+                       (int)MemInfo.Slots[Sl].Speed);
+        ReportWriteLine (FileHandle, Line);
+        UnicodeSPrint (Line, sizeof (Line),
+                       L"    Mfr: %a  P/N: %a  S/N: %a",
+                       MemInfo.Slots[Sl].Manufacturer,
+                       MemInfo.Slots[Sl].PartNumber,
+                       MemInfo.Slots[Sl].SerialNumber);
+        ReportWriteLine (FileHandle, Line);
+      }
+    }
+
+    ReportWriteLine (FileHandle, L"");
+
+    //
+    // PCI Network Controllers
+    //
+    {
+      NIC_INFO      AllNics[MAX_INTERFACES];
+      PCI_NIC_INFO  PciNicArr[MAX_PCI_NICS];
+      UINTN         AllNicCnt;
+      UINTN         PciNicCnt;
+      UINTN         P;
+      CHAR16        PciMacStr[20];
+
+      AllNicCnt = MAX_INTERFACES;
+      DiscoverNics (AllNics, &AllNicCnt);
+
+      PciNicCnt = MAX_PCI_NICS;
+      DiscoverPciNics (PciNicArr, &PciNicCnt, AllNics, AllNicCnt);
+
+      ReportWriteLine (FileHandle, L"  -- PCI Network Controllers --");
+      UnicodeSPrint (Line, sizeof (Line), L"  Found: %d PCI NIC(s), %d with SNP driver",
+                     (int)PciNicCnt, (int)AllNicCnt);
+      ReportWriteLine (FileHandle, Line);
+      ReportWriteLine (FileHandle, L"");
+
+      for (P = 0; P < PciNicCnt; P++) {
+        UnicodeSPrint (Line, sizeof (Line),
+                       L"  NIC %d: %s %s",
+                       (int)(P + 1),
+                       PciNicArr[P].VendorName,
+                       PciNicArr[P].DeviceModel);
+        ReportWriteLine (FileHandle, Line);
+        UnicodeSPrint (Line, sizeof (Line),
+                       L"    PCI BDF: %02X:%02X.%X  VID:DID: %04X:%04X  Driver: %s",
+                       (int)PciNicArr[P].Bus, (int)PciNicArr[P].Dev,
+                       (int)PciNicArr[P].Func,
+                       PciNicArr[P].VendorId, PciNicArr[P].DeviceId,
+                       PciNicArr[P].HasDriver ? L"Loaded" : L"NOT LOADED");
+        ReportWriteLine (FileHandle, Line);
+
+        if (PciNicArr[P].HasMac) {
+          UtilFormatMac (PciNicArr[P].MacAddress, PciMacStr);
+          UnicodeSPrint (Line, sizeof (Line),
+                         L"    MAC: %s  Link: %s",
+                         PciMacStr,
+                         PciNicArr[P].MediaPresent ? L"Up" : L"Down");
+          ReportWriteLine (FileHandle, Line);
+        } else {
+          ReportWriteLine (FileHandle, L"    MAC: N/A (no driver)");
+        }
+
+        if (PciNicArr[P].MatchedSnp) {
+          UnicodeSPrint (Line, sizeof (Line),
+                         L"    SNP Match: Yes (NIC index %d)",
+                         (int)PciNicArr[P].SnpIndex);
+          ReportWriteLine (FileHandle, Line);
+        }
+      }
+
+      ReportWriteLine (FileHandle, L"");
+    }
+  }
+
+  //
+  // ── Section 2: NIC Details ──
   //
   ReportWriteLine (FileHandle, L"================================================================");
-  ReportWriteLine (FileHandle, L"  SECTION 1: NETWORK INTERFACE");
+  ReportWriteLine (FileHandle, L"  SECTION 2: NETWORK INTERFACE");
   ReportWriteLine (FileHandle, L"================================================================");
   ReportWriteLine (FileHandle, L"");
 
@@ -552,10 +917,10 @@ ReportExportDetailed (
   ReportWriteLine (FileHandle, L"");
 
   //
-  // ── Section 2: Test Configuration ──
+  // ── Section 3: Test Configuration ──
   //
   ReportWriteLine (FileHandle, L"================================================================");
-  ReportWriteLine (FileHandle, L"  SECTION 2: TEST CONFIGURATION");
+  ReportWriteLine (FileHandle, L"  SECTION 3: TEST CONFIGURATION");
   ReportWriteLine (FileHandle, L"================================================================");
   ReportWriteLine (FileHandle, L"");
 
@@ -582,10 +947,10 @@ ReportExportDetailed (
   ReportWriteLine (FileHandle, L"");
 
   //
-  // ── Section 3: Results Summary ──
+  // ── Section 4: Results Summary ──
   //
   ReportWriteLine (FileHandle, L"================================================================");
-  ReportWriteLine (FileHandle, L"  SECTION 3: RESULTS SUMMARY");
+  ReportWriteLine (FileHandle, L"  SECTION 4: RESULTS SUMMARY");
   ReportWriteLine (FileHandle, L"================================================================");
   ReportWriteLine (FileHandle, L"");
 
@@ -632,10 +997,10 @@ ReportExportDetailed (
   ReportWriteLine (FileHandle, L"");
 
   //
-  // ── Section 4: Detailed Per-Test Results ──
+  // ── Section 5: Detailed Per-Test Results ──
   //
   ReportWriteLine (FileHandle, L"================================================================");
-  ReportWriteLine (FileHandle, L"  SECTION 4: DETAILED TEST RESULTS");
+  ReportWriteLine (FileHandle, L"  SECTION 5: DETAILED TEST RESULTS");
   ReportWriteLine (FileHandle, L"================================================================");
 
   for (I = 0; I < Ctx->ResultCount; I++) {
@@ -733,40 +1098,47 @@ ReportExportDetailed (
   ReportWriteLine (FileHandle, L"");
 
   //
-  // ── Section 5: Quick Diagnosis ──
+  // ── Section 6: Summary Diagnosis ──
   //
   ReportWriteLine (FileHandle, L"================================================================");
-  ReportWriteLine (FileHandle, L"  SECTION 5: AUTOMATIC DIAGNOSIS");
+  ReportWriteLine (FileHandle, L"  SECTION 6: SUMMARY DIAGNOSIS");
   ReportWriteLine (FileHandle, L"================================================================");
   ReportWriteLine (FileHandle, L"");
 
   //
-  // Run QuickScan diagnosis silently
+  // Generate diagnosis from existing results (no re-running tests)
   //
   {
-    CHAR16  Diagnosis[256];
-    CHAR16  DiagDetail[512];
+    UINTN  K;
 
-    ZeroMem (Diagnosis, sizeof (Diagnosis));
-    ZeroMem (DiagDetail, sizeof (DiagDetail));
-
-    Status = QuickScanGetDiagnosis (
-               Ctx->Nic,
-               Ctx->Config,
-               Diagnosis,
-               sizeof (Diagnosis),
-               DiagDetail,
-               sizeof (DiagDetail)
-               );
-    if (!EFI_ERROR (Status) && Diagnosis[0] != L'\0') {
-      UnicodeSPrint (Line, sizeof (Line), L"  Diagnosis: %s", Diagnosis);
-      ReportWriteLine (FileHandle, Line);
-      if (DiagDetail[0] != L'\0') {
-        UnicodeSPrint (Line, sizeof (Line), L"  Detail:    %s", DiagDetail);
+    if (FailCnt == 0 && ErrCnt == 0) {
+      if (WarnCnt > 0) {
+        ReportWriteLine (FileHandle, L"  Diagnosis: MOSTLY OK - All tests passed with some warnings.");
+        UnicodeSPrint (Line, sizeof (Line),
+                       L"  Detail:    %d warnings detected. Review WARN results above.", (int)WarnCnt);
         ReportWriteLine (FileHandle, Line);
+      } else {
+        ReportWriteLine (FileHandle, L"  Diagnosis: ALL PASS - Network stack is fully functional.");
       }
     } else {
-      ReportWriteLine (FileHandle, L"  Diagnosis: Unable to perform automatic diagnosis.");
+      UnicodeSPrint (Line, sizeof (Line),
+                     L"  Diagnosis: %d FAIL, %d ERROR detected in %d tests.",
+                     (int)FailCnt, (int)ErrCnt, (int)Ctx->ResultCount);
+      ReportWriteLine (FileHandle, Line);
+
+      //
+      // List failed tests
+      //
+      ReportWriteLine (FileHandle, L"");
+      ReportWriteLine (FileHandle, L"  Failed tests:");
+      for (K = 0; K < Ctx->ResultCount; K++) {
+        if (Ctx->Results[K].StatusCode == TEST_RESULT_FAIL ||
+            Ctx->Results[K].StatusCode == TEST_RESULT_ERROR) {
+          UnicodeSPrint (Line, sizeof (Line), L"    - %s: %s",
+                         Ctx->TestDefs[K]->Name, Ctx->Results[K].Summary);
+          ReportWriteLine (FileHandle, Line);
+        }
+      }
     }
   }
 
@@ -780,7 +1152,7 @@ ReportExportDetailed (
   ReportWriteLine (FileHandle, L"##  Generated by DDTSoft - EFI Network Test & OSI Analyzer    ##");
   ReportWriteLine (FileHandle, L"################################################################");
 
-  ShellCloseFile (&FileHandle);
+  FileHandle->Close (FileHandle);
   return EFI_SUCCESS;
 }
 
@@ -797,18 +1169,13 @@ ReportExportBinary (
   IN CONST CHAR16    *Filename
   )
 {
-  SHELL_FILE_HANDLE  FileHandle;
+  EFI_FILE_PROTOCOL  *FileHandle;
   EFI_STATUS         Status;
   UINT32             Magic;
   UINT32             Version;
   UINT32             Count;
 
-  Status = ShellOpenFileByName (
-             (CHAR16 *)Filename,
-             &FileHandle,
-             EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE,
-             0
-             );
+  Status = ReportOpenFile (Filename, &FileHandle);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -846,7 +1213,7 @@ ReportExportBinary (
       );
   }
 
-  ShellCloseFile (&FileHandle);
+  FileHandle->Close (FileHandle);
   return EFI_SUCCESS;
 }
 
@@ -906,7 +1273,7 @@ ReportRunTests (
   UiPrintAt (3, 5, L"Running tests for report export...");
   UiPrintAt (3, 6, L"NIC: %s", Nic->Name);
 
-  UiSetColor (EFI_DARKGRAY, COLOR_BG);
+  UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
   UiDrawStatusBar (L"Press [ESC] to cancel report generation");
 
   for (I = 0; I < TestCount; I++) {
@@ -1164,7 +1531,7 @@ ShowReports (
     CopyMem (&Config.TargetIp, &TmpComp, sizeof (EFI_IPv4_ADDRESS));
     Config.TimeoutMs     = 3000;
     Config.Iterations    = 1;
-    Config.TargetPort    = 80;
+    Config.TargetPort    = 0;
     Config.CompanionPort = CONTROL_CHANNEL_PORT;
   }
 
@@ -1224,7 +1591,7 @@ ShowReports (
     UiPrintAt (5, 16, L"[7] Full Report         - All layers (%d tests)",
                (int)RegGetTestCount ());
 
-    UiSetColor (EFI_DARKGRAY, COLOR_BG);
+    UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
     UiPrintAt (5, 18, L"[N] Change NIC  [T] Change Target IP");
     UiPrintAt (5, 19, L"[ESC] Back to main menu");
 
@@ -1327,4 +1694,40 @@ ShowReports (
   FreePool (Results);
   FreePool (Nics);
   return EFI_SUCCESS;
+}
+
+//
+// ============================================================
+// Public: ExportTestResults
+// Allows the Run Tests menu to export its results directly
+// without re-running tests.
+// ============================================================
+//
+EFI_STATUS
+ExportTestResults (
+  IN NIC_INFO          *Nic,
+  IN TEST_CONFIG       *Config,
+  IN TEST_DEFINITION   **TestDefs,
+  IN TEST_RESULT_DATA  *Results,
+  IN UINTN             ResultCount,
+  IN OSI_LAYER         Layer
+  )
+{
+  REPORT_CONTEXT  Ctx;
+
+  if (Nic == NULL || Results == NULL || ResultCount == 0) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  ZeroMem (&Ctx, sizeof (REPORT_CONTEXT));
+  Ctx.Nic         = Nic;
+  Ctx.Config       = Config;
+  Ctx.TestDefs     = TestDefs;
+  Ctx.Results      = Results;
+  Ctx.ResultCount  = ResultCount;
+  Ctx.Layer        = Layer;
+
+  ReportGetTimestamp (Ctx.Timestamp, 32, &Ctx.Time);
+
+  return ReportDoExport (&Ctx);
 }

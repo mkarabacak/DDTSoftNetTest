@@ -156,6 +156,12 @@ UiWaitKey (
   VOID
   );
 
+BOOLEAN
+UiWaitKeyTimeout (
+  IN  UINT32          TimeoutMs,
+  OUT EFI_INPUT_KEY   *Key
+  );
+
 //
 // Message display helpers
 //

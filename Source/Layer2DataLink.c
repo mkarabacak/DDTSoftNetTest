@@ -105,10 +105,26 @@ TestL2MacAddressValid (
 }
 
 /**
+  ARP completion callback — sets BOOLEAN flag to TRUE.
+**/
+STATIC
+VOID
+EFIAPI
+L2ArpNotify (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  if (Context != NULL) {
+    *((BOOLEAN *)Context) = TRUE;
+  }
+}
+
+/**
   Resolve an IP address to MAC via EFI_ARP_PROTOCOL.
-  Creates a child ARP instance, configures it, and sends a request.
-  This works correctly even when the IP4 stack is active (which
-  consumes raw ARP frames from SNP.Receive).
+  Creates a child ARP instance, configures it, and sends a non-blocking
+  request. Polls at TPL_APPLICATION so MNP timer events can fire and
+  process ARP replies from the network.
 
   @param[in]  NicHandle  The NIC handle with ARP service binding.
   @param[in]  LocalIp    Our IPv4 address (4 bytes).
@@ -188,7 +204,7 @@ TryArpViaProtocol (
   ArpConfig.SwAddressLength = 4;
   ArpConfig.StationAddress  = &StationAddr;
   ArpConfig.EntryTimeOut    = 0;         // No cache timeout
-  ArpConfig.RetryCount      = 3;
+  ArpConfig.RetryCount      = 5;
   ArpConfig.RetryTimeOut    = 10000000;  // 1 second (100ns units)
 
   Status = Arp->Configure (Arp, &ArpConfig);
@@ -198,28 +214,58 @@ TryArpViaProtocol (
   }
 
   //
-  // Send ARP request (synchronous — blocks until reply or timeout)
+  // Non-blocking ARP request.
+  // Blocking Arp->Request(NULL) raises TPL to TPL_CALLBACK, preventing
+  // MNP timer events from firing — ARP replies never get processed.
+  // Non-blocking with polling at TPL_APPLICATION allows MNP timer to
+  // receive ARP replies and deliver them to the ARP module.
   //
-  ZeroMem (&ResolvedAddr, sizeof (ResolvedAddr));
+  {
+    BOOLEAN    ArpDone;
+    EFI_EVENT  ArpEvent;
+    UINTN      PollI;
+    BOOLEAN    Resolved;
 
-  Status = Arp->Request (
-                  Arp,
-                  (VOID *)TargetIp,
-                  NULL,               // Blocking (no event)
-                  &ResolvedAddr
-                  );
+    ArpDone  = FALSE;
+    ArpEvent = NULL;
+    Resolved = FALSE;
 
-  if (!EFI_ERROR (Status)) {
-    CopyMem (ReplyMac, &ResolvedAddr, 6);
+    if (!EFI_ERROR (gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+          L2ArpNotify, &ArpDone, &ArpEvent))) {
+      ZeroMem (&ResolvedAddr, sizeof (ResolvedAddr));
+      Status = Arp->Request (Arp, (VOID *)TargetIp, ArpEvent, &ResolvedAddr);
+
+      if (Status == EFI_SUCCESS) {
+        //
+        // Cache hit — already resolved
+        //
+        CopyMem (ReplyMac, &ResolvedAddr, 6);
+        Resolved = TRUE;
+      } else if (!EFI_ERROR (Status) || Status == EFI_NOT_READY) {
+        //
+        // Request queued — poll at TPL_APPLICATION (up to 5s)
+        //
+        for (PollI = 0; PollI < 5000 && !ArpDone; PollI++) {
+          gBS->Stall (1000);  // 1ms
+        }
+
+        if (ArpDone) {
+          CopyMem (ReplyMac, &ResolvedAddr, 6);
+          Resolved = TRUE;
+        }
+      }
+
+      gBS->CloseEvent (ArpEvent);
+    }
+
+    //
+    // Cleanup
+    //
+    Arp->Configure (Arp, NULL);
+    ArpSb->DestroyChild (ArpSb, ArpChild);
+
+    return Resolved;
   }
-
-  //
-  // Cleanup
-  //
-  Arp->Configure (Arp, NULL);  // Unconfigure
-  ArpSb->DestroyChild (ArpSb, ArpChild);
-
-  return !EFI_ERROR (Status);
 }
 
 /**
@@ -292,6 +338,9 @@ TryArpViaSnp (
   Uses EFI_ARP_PROTOCOL (through the UEFI network stack) as the primary
   method. Falls back to raw SNP TX/RX if ARP protocol is not available.
 
+  Uses the NIC's actual IP configuration (from DHCP/Ip4Config2) as the
+  sender address, since ARP must use the correct local IP to get replies.
+
   PASS: ARP reply received with valid MAC
   WARN: No reply (no reachable target on network)
   FAIL: TX failed (NIC problem)
@@ -308,6 +357,7 @@ TestL2ArpRequestReply (
   CHAR16                       MacStr[20];
   BOOLEAN                      Resolved;
   UINT8                        *ResolvedIp;
+  UINT8                        *SenderIp;
 
   Snp = Nic->Snp;
   if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
@@ -321,16 +371,28 @@ TestL2ArpRequestReply (
   ResolvedIp = NULL;
 
   //
+  // Use NIC's actual IP as ARP sender (critical for correct resolution).
+  // If NIC has IP from DHCP/static config, use that; else fall back to Config.
+  //
+  if (Nic->HasIpConfig &&
+      (Nic->Ipv4Address.Addr[0] != 0 || Nic->Ipv4Address.Addr[1] != 0 ||
+       Nic->Ipv4Address.Addr[2] != 0 || Nic->Ipv4Address.Addr[3] != 0)) {
+    SenderIp = Nic->Ipv4Address.Addr;
+  } else {
+    SenderIp = Config->LocalIp.Addr;
+  }
+
+  //
   // Method 1: Use EFI_ARP_PROTOCOL (works even when IP4 stack is active)
   //
   if (Nic->HasArp) {
     //
-    // Try gateway first
+    // Try NIC's actual gateway first (most likely to respond)
     //
     if (Nic->Gateway.Addr[0] != 0 || Nic->Gateway.Addr[1] != 0 ||
         Nic->Gateway.Addr[2] != 0 || Nic->Gateway.Addr[3] != 0) {
       Resolved = TryArpViaProtocol (
-                   Nic->Handle, Config->LocalIp.Addr,
+                   Nic->Handle, SenderIp,
                    Nic->Gateway.Addr, ReplyMac
                    );
       if (Resolved) {
@@ -339,12 +401,12 @@ TestL2ArpRequestReply (
     }
 
     //
-    // Try target IP
+    // Try config target IP
     //
     if (!Resolved && (Config->TargetIp.Addr[0] != 0 || Config->TargetIp.Addr[1] != 0 ||
                       Config->TargetIp.Addr[2] != 0 || Config->TargetIp.Addr[3] != 0)) {
       Resolved = TryArpViaProtocol (
-                   Nic->Handle, Config->LocalIp.Addr,
+                   Nic->Handle, SenderIp,
                    Config->TargetIp.Addr, ReplyMac
                    );
       if (Resolved) {
@@ -353,12 +415,12 @@ TestL2ArpRequestReply (
     }
 
     //
-    // Try config gateway
+    // Try config gateway (if different from NIC gateway)
     //
     if (!Resolved && (Config->Gateway.Addr[0] != 0 || Config->Gateway.Addr[1] != 0 ||
                       Config->Gateway.Addr[2] != 0 || Config->Gateway.Addr[3] != 0)) {
       Resolved = TryArpViaProtocol (
-                   Nic->Handle, Config->LocalIp.Addr,
+                   Nic->Handle, SenderIp,
                    Config->Gateway.Addr, ReplyMac
                    );
       if (Resolved) {
@@ -368,7 +430,8 @@ TestL2ArpRequestReply (
   }
 
   //
-  // Method 2: Raw SNP fallback (when ARP protocol not available)
+  // Method 2: Raw SNP fallback (when ARP protocol not available).
+  // Note: if MNP is active on this SNP, it may consume RX frames.
   //
   if (!Resolved) {
     Snp->ReceiveFilters (
@@ -382,7 +445,7 @@ TestL2ArpRequestReply (
         Nic->Gateway.Addr[2] != 0 || Nic->Gateway.Addr[3] != 0) {
       Resolved = TryArpViaSnp (
                    Snp, Snp->Mode->CurrentAddress.Addr,
-                   Config->LocalIp.Addr, Nic->Gateway.Addr,
+                   SenderIp, Nic->Gateway.Addr,
                    ReplyMac, 2000
                    );
       if (Resolved) {
@@ -394,7 +457,7 @@ TestL2ArpRequestReply (
                       Config->TargetIp.Addr[2] != 0 || Config->TargetIp.Addr[3] != 0)) {
       Resolved = TryArpViaSnp (
                    Snp, Snp->Mode->CurrentAddress.Addr,
-                   Config->LocalIp.Addr, Config->TargetIp.Addr,
+                   SenderIp, Config->TargetIp.Addr,
                    ReplyMac, 2000
                    );
       if (Resolved) {
@@ -412,19 +475,22 @@ TestL2ArpRequestReply (
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
                    L"ARP reply received: %s", MacStr);
     UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
-                   L"%d.%d.%d.%d resolved to %s",
+                   L"%d.%d.%d.%d resolved to %s (sender=%d.%d.%d.%d)",
                    ResolvedIp[0], ResolvedIp[1],
                    ResolvedIp[2], ResolvedIp[3],
-                   MacStr);
+                   MacStr,
+                   SenderIp[0], SenderIp[1], SenderIp[2], SenderIp[3]);
   } else {
     Result->StatusCode = TEST_RESULT_WARN;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
                    L"No ARP reply from gateway or target");
     UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
-                   L"ARP requests sent via %s but no host responded",
-                   Nic->HasArp ? L"ARP protocol" : L"raw SNP");
+                   L"ARP sent via %s, sender=%d.%d.%d.%d, no host responded",
+                   Nic->HasArp ? L"ARP protocol" : L"raw SNP",
+                   SenderIp[0], SenderIp[1], SenderIp[2], SenderIp[3]);
     UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
-                   L"Verify companion/target is on the same subnet");
+                   L"Verify target is on the same subnet as %d.%d.%d.%d",
+                   SenderIp[0], SenderIp[1], SenderIp[2], SenderIp[3]);
   }
 
   return EFI_SUCCESS;
@@ -536,9 +602,191 @@ TestL2BroadcastFrame (
 }
 
 /**
+  Try to receive frames via MNP (Managed Network Protocol).
+  When the UEFI network stack (MNP/IP4) is active on an SNP,
+  MNP's background polling drains the SNP receive queue. Direct
+  Snp->Receive() calls get nothing. MNP receive is the correct
+  way to capture incoming frames when the stack is active.
+
+  @param[in]  NicHandle       NIC handle with MNP service binding.
+  @param[out] FramesReceived  Number of frames received.
+  @param[out] BytesReceived   Total bytes received.
+  @param[in]  TimeoutMs       Timeout in milliseconds.
+
+  @retval TRUE   At least one frame received.
+  @retval FALSE  No frames received or MNP setup failed.
+**/
+STATIC
+BOOLEAN
+TryReceiveViaMnp (
+  IN  EFI_HANDLE  NicHandle,
+  OUT UINTN       *FramesReceived,
+  OUT UINTN       *BytesReceived,
+  IN  UINTN       TimeoutMs
+  )
+{
+  EFI_STATUS                             Status;
+  EFI_SERVICE_BINDING_PROTOCOL           *MnpSb;
+  EFI_MANAGED_NETWORK_PROTOCOL           *Mnp;
+  EFI_HANDLE                             MnpChild;
+  EFI_MANAGED_NETWORK_CONFIG_DATA        MnpConfig;
+  EFI_MANAGED_NETWORK_COMPLETION_TOKEN   RxToken;
+  EFI_EVENT                              RxEvent;
+  UINTN                                  I;
+  BOOLEAN                                GotFrame;
+
+  *FramesReceived = 0;
+  *BytesReceived  = 0;
+  GotFrame        = FALSE;
+  MnpSb           = NULL;
+  Mnp             = NULL;
+  MnpChild        = NULL;
+  RxEvent         = NULL;
+
+  //
+  // Open MNP Service Binding
+  //
+  Status = gBS->OpenProtocol (
+                  NicHandle,
+                  &gEfiManagedNetworkServiceBindingProtocolGuid,
+                  (VOID **)&MnpSb,
+                  gImageHandle,
+                  NicHandle,
+                  EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                  );
+  if (EFI_ERROR (Status) || MnpSb == NULL) {
+    return FALSE;
+  }
+
+  //
+  // Create MNP child instance
+  //
+  Status = MnpSb->CreateChild (MnpSb, &MnpChild);
+  if (EFI_ERROR (Status) || MnpChild == NULL) {
+    return FALSE;
+  }
+
+  //
+  // Open MNP protocol on child
+  //
+  Status = gBS->OpenProtocol (
+                  MnpChild,
+                  &gEfiManagedNetworkProtocolGuid,
+                  (VOID **)&Mnp,
+                  gImageHandle,
+                  NicHandle,
+                  EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                  );
+  if (EFI_ERROR (Status) || Mnp == NULL) {
+    MnpSb->DestroyChild (MnpSb, MnpChild);
+    return FALSE;
+  }
+
+  //
+  // Configure MNP to receive all Ethernet frame types
+  //
+  ZeroMem (&MnpConfig, sizeof (MnpConfig));
+  MnpConfig.ReceivedQueueTimeoutValue   = 0;
+  MnpConfig.TransmitQueueTimeoutValue   = 0;
+  MnpConfig.ProtocolTypeFilter          = 0;      // All EtherTypes
+  MnpConfig.EnableUnicastReceive        = TRUE;
+  MnpConfig.EnableMulticastReceive      = TRUE;
+  MnpConfig.EnableBroadcastReceive      = TRUE;
+  MnpConfig.EnablePromiscuousReceive    = FALSE;
+  MnpConfig.FlushQueuesOnReset          = TRUE;
+  MnpConfig.EnableReceiveTimestamps     = FALSE;
+  MnpConfig.DisableBackgroundPolling    = FALSE;
+
+  Status = Mnp->Configure (Mnp, &MnpConfig);
+  if (EFI_ERROR (Status)) {
+    MnpSb->DestroyChild (MnpSb, MnpChild);
+    return FALSE;
+  }
+
+  //
+  // Create event for receive completion token
+  //
+  Status = gBS->CreateEvent (0, TPL_CALLBACK, NULL, NULL, &RxEvent);
+  if (EFI_ERROR (Status)) {
+    Mnp->Configure (Mnp, NULL);
+    MnpSb->DestroyChild (MnpSb, MnpChild);
+    return FALSE;
+  }
+
+  //
+  // Queue asynchronous receive
+  //
+  ZeroMem (&RxToken, sizeof (RxToken));
+  RxToken.Event         = RxEvent;
+  RxToken.Status        = EFI_NOT_READY;
+  RxToken.Packet.RxData = NULL;
+
+  Status = Mnp->Receive (Mnp, &RxToken);
+  if (EFI_ERROR (Status)) {
+    gBS->CloseEvent (RxEvent);
+    Mnp->Configure (Mnp, NULL);
+    MnpSb->DestroyChild (MnpSb, MnpChild);
+    return FALSE;
+  }
+
+  //
+  // Poll for incoming frames
+  //
+  for (I = 0; I < TimeoutMs; I++) {
+    Mnp->Poll (Mnp);
+
+    if (RxToken.Status != EFI_NOT_READY) {
+      if (!EFI_ERROR (RxToken.Status) && RxToken.Packet.RxData != NULL) {
+        *FramesReceived += 1;
+        *BytesReceived  += RxToken.Packet.RxData->PacketLength;
+
+        //
+        // Recycle the receive buffer
+        //
+        gBS->SignalEvent (RxToken.Packet.RxData->RecycleEvent);
+      }
+
+      //
+      // Re-queue receive for more frames
+      //
+      RxToken.Status        = EFI_NOT_READY;
+      RxToken.Packet.RxData = NULL;
+      Status = Mnp->Receive (Mnp, &RxToken);
+      if (EFI_ERROR (Status)) {
+        break;
+      }
+    }
+
+    gBS->Stall (1000);  // 1ms
+  }
+
+  //
+  // Cancel any pending receive
+  //
+  if (RxToken.Status == EFI_NOT_READY) {
+    Mnp->Cancel (Mnp, &RxToken);
+  }
+
+  GotFrame = (*FramesReceived > 0);
+
+  //
+  // Cleanup
+  //
+  Mnp->Configure (Mnp, NULL);
+  gBS->CloseEvent (RxEvent);
+  MnpSb->DestroyChild (MnpSb, MnpChild);
+
+  return GotFrame;
+}
+
+/**
   Test L2.5: Frame TX/RX
   Sends an ARP request (which should generate a reply if target exists)
   and verifies both TX and RX work at the frame level.
+
+  Uses MNP receive when available (since the active UEFI network stack
+  consumes frames from SNP.Receive). Falls back to raw SNP if MNP is
+  not present.
 
   PASS: Frame sent and response received
   WARN: Frame sent but no response (target may not exist)
@@ -560,6 +808,9 @@ TestL2FrameTxRx (
   UINTN                        HdrSize;
   UINTN                        I;
   UINTN                        RxCount;
+  UINTN                        RxBytes;
+  UINT8                        *SenderIp;
+  BOOLEAN                      UsedMnp;
 
   Snp = Nic->Snp;
   if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
@@ -567,6 +818,17 @@ TestL2FrameTxRx (
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
                    L"SNP not initialized");
     return EFI_SUCCESS;
+  }
+
+  //
+  // Use NIC's actual IP for ARP sender (same logic as L2.2)
+  //
+  if (Nic->HasIpConfig &&
+      (Nic->Ipv4Address.Addr[0] != 0 || Nic->Ipv4Address.Addr[1] != 0 ||
+       Nic->Ipv4Address.Addr[2] != 0 || Nic->Ipv4Address.Addr[3] != 0)) {
+    SenderIp = Nic->Ipv4Address.Addr;
+  } else {
+    SenderIp = Config->LocalIp.Addr;
   }
 
   //
@@ -585,7 +847,7 @@ TestL2FrameTxRx (
   TxLen = PktBuildArpRequest (
             TxBuf,
             Snp->Mode->CurrentAddress.Addr,
-            Config->LocalIp.Addr,
+            SenderIp,
             Config->TargetIp.Addr
             );
 
@@ -601,33 +863,55 @@ TestL2FrameTxRx (
   Result->BytesSent   = TxLen;
 
   //
-  // Try to receive any frames for 2 seconds
+  // Method 1: Receive via MNP (preferred when network stack is active).
+  // When MNP/IP4 is active on the SNP, MNP's background polling drains
+  // the SNP receive queue. Direct Snp->Receive() gets nothing.
   //
   RxCount = 0;
-  for (I = 0; I < 2000; I++) {
-    RxLen   = sizeof (RxBuf);
-    HdrSize = 0;
-    Status  = Snp->Receive (Snp, &HdrSize, &RxLen, RxBuf, NULL, NULL, NULL);
+  RxBytes = 0;
+  UsedMnp = FALSE;
 
-    if (!EFI_ERROR (Status)) {
-      RxCount++;
-      Result->PacketsReceived = RxCount;
-      Result->BytesReceived  += RxLen;
-    }
-
-    gBS->Stall (1000);
+  if (Nic->HasMnp) {
+    UsedMnp = TryReceiveViaMnp (Nic->Handle, &RxCount, &RxBytes, 2000);
   }
+
+  //
+  // Method 2: Fall back to raw SNP receive (when MNP not available)
+  //
+  if (!UsedMnp && RxCount == 0) {
+    for (I = 0; I < 2000; I++) {
+      RxLen   = sizeof (RxBuf);
+      HdrSize = 0;
+      Status  = Snp->Receive (Snp, &HdrSize, &RxLen, RxBuf, NULL, NULL, NULL);
+
+      if (!EFI_ERROR (Status)) {
+        RxCount++;
+        RxBytes += RxLen;
+      }
+
+      gBS->Stall (1000);
+    }
+  }
+
+  Result->PacketsReceived = RxCount;
+  Result->BytesReceived   = RxBytes;
 
   if (RxCount > 0) {
     Result->StatusCode = TEST_RESULT_PASS;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"TX/RX working: sent 1 frame, received %d frame(s)", RxCount);
+                   L"TX/RX working: sent 1, received %d frame(s) via %s",
+                   RxCount, UsedMnp ? L"MNP" : L"SNP");
   } else {
     Result->StatusCode = TEST_RESULT_WARN;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
                    L"TX succeeded but no frames received in 2s");
     UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
-                   L"Target may not exist or NIC RX filters may block incoming frames");
+                   L"Tried %s receive. Target %d.%d.%d.%d may not exist.",
+                   Nic->HasMnp ? L"MNP" : L"SNP",
+                   Config->TargetIp.Addr[0], Config->TargetIp.Addr[1],
+                   Config->TargetIp.Addr[2], Config->TargetIp.Addr[3]);
+    UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
+                   L"Ensure companion/target is running on the same subnet");
   }
 
   return EFI_SUCCESS;

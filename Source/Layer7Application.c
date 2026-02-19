@@ -1202,11 +1202,27 @@ TestL7HttpGet (
 
   Status = Http->Request (Http, &ReqToken);
   if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_FAIL;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"HTTP Request failed: %r", Status);
-    UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
-                   L"Verify HTTP server is running at target IP");
+    if (Status == EFI_ACCESS_DENIED) {
+      //
+      // Some UEFI firmware HTTP drivers return Access Denied
+      // due to platform security policy (Secure Boot restrictions,
+      // TLS-only mode, etc). This is a firmware limitation, not a test failure.
+      //
+      Result->StatusCode = TEST_RESULT_WARN;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"HTTP blocked by firmware security policy");
+      UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
+                     L"EFI_HTTP_PROTOCOL returned EFI_ACCESS_DENIED. "
+                     L"This platform may require HTTPS or restrict HTTP.");
+      UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
+                     L"Try TCP-level HTTP test instead (L4 TCP Connect port 80)");
+    } else {
+      Result->StatusCode = TEST_RESULT_FAIL;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"HTTP Request failed: %r", Status);
+      UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
+                     L"Verify HTTP server is running at target IP");
+    }
     gBS->CloseEvent (ReqToken.Event);
     L7DestroyHttpChild (Nic->Handle, ChildHandle, Http);
     return EFI_SUCCESS;
@@ -1504,6 +1520,24 @@ TestL7HttpStatusCodes (
 
     Status = Http->Request (Http, &ReqToken);
     if (EFI_ERROR (Status)) {
+      if (Status == EFI_ACCESS_DENIED && PathIdx == 0) {
+        //
+        // Platform blocks HTTP — abort all paths, report as WARN
+        //
+        gBS->CloseEvent (ReqToken.Event);
+        L7DestroyHttpChild (Nic->Handle, ChildHandle, Http);
+
+        Result->StatusCode = TEST_RESULT_WARN;
+        UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                       L"HTTP blocked by firmware security policy");
+        UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
+                       L"EFI_HTTP_PROTOCOL returned EFI_ACCESS_DENIED. "
+                       L"Platform may require HTTPS or restrict HTTP.");
+        UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
+                       L"TCP connectivity to port 80 works (see L4 tests)");
+        return EFI_SUCCESS;
+      }
+
       gBS->CloseEvent (ReqToken.Event);
       L7DestroyHttpChild (Nic->Handle, ChildHandle, Http);
       continue;

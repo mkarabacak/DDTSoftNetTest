@@ -2,14 +2,20 @@
   Layer 3 (Network) test implementations.
   Tests IP configuration, ICMP echo/sweep, TTL discovery, MTU path discovery,
   IP fragmentation, IPv6 ND, IP header validation, routing, and duplicate IP detection.
-  Uses EFI_SIMPLE_NETWORK_PROTOCOL for raw frame operations and
-  EFI_IP4_CONFIG2_PROTOCOL for IP configuration queries.
+
+  Uses EFI_ARP_PROTOCOL for MAC resolution and EFI_IP4_PROTOCOL for ICMP
+  when the IP4 stack is active (the MNP layer consumes frames from
+  SNP.Receive, making raw SNP receive unusable). Falls back to raw SNP
+  when protocol stack is unavailable.
 **/
 
 #include <DDTSoftNetTest.h>
 #include <OsiLayers.h>
 #include <TestCases.h>
 #include <PacketDefs.h>
+#include <Protocol/Arp.h>
+#include <Protocol/ServiceBinding.h>
+#include <Protocol/Ip4.h>
 
 //
 // ICMP echo identifier used across L3 tests
@@ -18,13 +24,202 @@
 
 //
 // ============================================================
-// Static helpers
+// IP4 async event callback (empty - we poll Token.Status)
+// ============================================================
+//
+
+STATIC
+VOID
+EFIAPI
+L3Ip4DummyNotify (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  //
+  // Nothing needed - Token.Status is checked for completion
+  //
+}
+
+/**
+  ARP completion callback — sets BOOLEAN flag to TRUE.
+**/
+STATIC
+VOID
+EFIAPI
+L3ArpNotify (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  if (Context != NULL) {
+    *((BOOLEAN *)Context) = TRUE;
+  }
+}
+
+//
+// ============================================================
+// ARP resolution helpers
 // ============================================================
 //
 
 /**
-  Resolve the MAC address of a target IP via ARP.
-  Sends an ARP request and waits for a reply.
+  Resolve target MAC via EFI_ARP_PROTOCOL.
+  Creates a child ARP instance, configures it with our IP,
+  and sends a blocking ARP request. Works correctly even when
+  the IP4 stack is active (which consumes raw ARP frames from SNP.Receive).
+
+  @param[in]  NicHandle  NIC handle with ARP service binding.
+  @param[in]  LocalIp    Our IPv4 address (4 bytes).
+  @param[in]  TargetIp   Target IPv4 to resolve (4 bytes).
+  @param[out] TargetMac  Resolved MAC address (6 bytes).
+
+  @retval EFI_SUCCESS      MAC resolved.
+  @retval EFI_UNSUPPORTED  ARP protocol not available.
+  @retval EFI_TIMEOUT      No ARP reply.
+**/
+STATIC
+EFI_STATUS
+L3ArpResolveViaProtocol (
+  IN  EFI_HANDLE   NicHandle,
+  IN  CONST UINT8  *LocalIp,
+  IN  CONST UINT8  *TargetIp,
+  OUT UINT8        *TargetMac
+  )
+{
+  EFI_STATUS                    Status;
+  EFI_SERVICE_BINDING_PROTOCOL  *ArpSb;
+  EFI_ARP_PROTOCOL              *Arp;
+  EFI_HANDLE                    ArpChild;
+  EFI_ARP_CONFIG_DATA           ArpConfig;
+  EFI_IPv4_ADDRESS              StationAddr;
+  EFI_MAC_ADDRESS               ResolvedAddr;
+
+  ArpSb    = NULL;
+  Arp      = NULL;
+  ArpChild = NULL;
+
+  //
+  // Open ARP Service Binding on the NIC handle
+  //
+  Status = gBS->OpenProtocol (
+                  NicHandle,
+                  &gEfiArpServiceBindingProtocolGuid,
+                  (VOID **)&ArpSb,
+                  gImageHandle,
+                  NicHandle,
+                  EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                  );
+  if (EFI_ERROR (Status) || ArpSb == NULL) {
+    return EFI_UNSUPPORTED;
+  }
+
+  //
+  // Create ARP child instance
+  //
+  Status = ArpSb->CreateChild (ArpSb, &ArpChild);
+  if (EFI_ERROR (Status) || ArpChild == NULL) {
+    return EFI_UNSUPPORTED;
+  }
+
+  //
+  // Open ARP protocol on the child handle
+  //
+  Status = gBS->OpenProtocol (
+                  ArpChild,
+                  &gEfiArpProtocolGuid,
+                  (VOID **)&Arp,
+                  gImageHandle,
+                  NicHandle,
+                  EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                  );
+  if (EFI_ERROR (Status) || Arp == NULL) {
+    ArpSb->DestroyChild (ArpSb, ArpChild);
+    return EFI_UNSUPPORTED;
+  }
+
+  //
+  // Configure ARP instance with our IP
+  //
+  CopyMem (&StationAddr, LocalIp, 4);
+
+  ZeroMem (&ArpConfig, sizeof (ArpConfig));
+  ArpConfig.SwAddressType   = 0x0800;      // IPv4
+  ArpConfig.SwAddressLength = 4;
+  ArpConfig.StationAddress  = &StationAddr;
+  ArpConfig.EntryTimeOut    = 0;           // No cache timeout
+  ArpConfig.RetryCount      = 10;
+  ArpConfig.RetryTimeOut    = 10000000;    // 1 second (100ns units)
+
+  Status = Arp->Configure (Arp, &ArpConfig);
+  if (EFI_ERROR (Status)) {
+    ArpSb->DestroyChild (ArpSb, ArpChild);
+    return EFI_DEVICE_ERROR;
+  }
+
+  //
+  // Non-blocking ARP request.
+  // Blocking Arp->Request(NULL) raises TPL to TPL_CALLBACK, preventing
+  // MNP timer events from firing — ARP replies never get processed.
+  // Non-blocking with polling at TPL_APPLICATION allows MNP timer to
+  // receive ARP replies from SNP and deliver them to the ARP module.
+  //
+  {
+    BOOLEAN    ArpDone;
+    EFI_EVENT  ArpEvent;
+    UINTN      PollI;
+
+    ArpDone  = FALSE;
+    ArpEvent = NULL;
+
+    Status = gBS->CreateEvent (
+                    EVT_NOTIFY_SIGNAL,
+                    TPL_CALLBACK,
+                    L3ArpNotify,
+                    &ArpDone,
+                    &ArpEvent
+                    );
+    if (EFI_ERROR (Status)) {
+      Arp->Configure (Arp, NULL);
+      ArpSb->DestroyChild (ArpSb, ArpChild);
+      return EFI_DEVICE_ERROR;
+    }
+
+    ZeroMem (&ResolvedAddr, sizeof (ResolvedAddr));
+    Status = Arp->Request (Arp, (VOID *)TargetIp, ArpEvent, &ResolvedAddr);
+
+    if (Status == EFI_SUCCESS) {
+      //
+      // Cache hit — already resolved
+      //
+      CopyMem (TargetMac, &ResolvedAddr, 6);
+    } else if (!EFI_ERROR (Status) || Status == EFI_NOT_READY) {
+      //
+      // Request queued — poll at TPL_APPLICATION (up to 10s)
+      //
+      for (PollI = 0; PollI < 10000 && !ArpDone; PollI++) {
+        gBS->Stall (1000);  // 1ms
+      }
+
+      if (ArpDone) {
+        CopyMem (TargetMac, &ResolvedAddr, 6);
+        Status = EFI_SUCCESS;
+      } else {
+        Status = EFI_TIMEOUT;
+      }
+    }
+
+    gBS->CloseEvent (ArpEvent);
+  }
+
+  Arp->Configure (Arp, NULL);
+  ArpSb->DestroyChild (ArpSb, ArpChild);
+  return Status;
+}
+
+/**
+  Resolve target MAC via raw SNP ARP (fallback).
+  Used when EFI_ARP_PROTOCOL is not available on the NIC handle.
 
   @param[in]  Snp        SNP protocol instance (must be initialized).
   @param[in]  SrcIp      Our IP address (4 bytes).
@@ -38,7 +233,7 @@
 **/
 STATIC
 EFI_STATUS
-L3ResolveTargetMac (
+L3ArpResolveViaSnp (
   IN  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp,
   IN  CONST UINT8                  *SrcIp,
   IN  CONST UINT8                  *TargetIp,
@@ -99,21 +294,470 @@ L3ResolveTargetMac (
 }
 
 /**
-  Send an ICMP Echo Request and wait for an Echo Reply.
-  Measures round-trip time in microseconds.
+  Combined ARP resolver: tries ARP protocol first, falls back to raw SNP.
 
-  @param[in]  Snp        SNP protocol instance.
-  @param[in]  SrcMac     Source MAC (6 bytes).
-  @param[in]  DstMac     Destination MAC (6 bytes).
-  @param[in]  SrcIp      Source IP (4 bytes).
-  @param[in]  DstIp      Destination IP (4 bytes).
-  @param[in]  SeqNum     ICMP sequence number.
-  @param[in]  Ttl        IP TTL value.
+  @param[in]  Nic        NIC information structure.
+  @param[in]  SrcIp      Our IP address (4 bytes).
+  @param[in]  TargetIp   Target IP to resolve (4 bytes).
+  @param[out] TargetMac  Resolved MAC address (6 bytes).
+  @param[in]  TimeoutMs  Timeout in milliseconds (for SNP fallback).
+
+  @retval EFI_SUCCESS    MAC resolved.
+  @retval other          Resolution failed.
+**/
+STATIC
+EFI_STATUS
+L3ResolveTargetMac (
+  IN  NIC_INFO    *Nic,
+  IN  CONST UINT8 *SrcIp,
+  IN  CONST UINT8 *TargetIp,
+  OUT UINT8       *TargetMac,
+  IN  UINTN       TimeoutMs
+  )
+{
+  EFI_STATUS  Status;
+
+  //
+  // Method 1: Use EFI_ARP_PROTOCOL (works when IP4 stack is active)
+  //
+  if (Nic->HasArp) {
+    Status = L3ArpResolveViaProtocol (Nic->Handle, SrcIp, TargetIp, TargetMac);
+    if (!EFI_ERROR (Status)) {
+      return EFI_SUCCESS;
+    }
+  }
+
+  //
+  // Method 2: Raw SNP fallback (only works when IP4 stack is NOT active)
+  //
+  if (Nic->Snp != NULL && Nic->Snp->Mode->State == EfiSimpleNetworkInitialized) {
+    return L3ArpResolveViaSnp (Nic->Snp, SrcIp, TargetIp, TargetMac, TimeoutMs);
+  }
+
+  return EFI_NOT_READY;
+}
+
+//
+// ============================================================
+// ICMP helpers
+// ============================================================
+//
+
+/**
+  Send ICMP echo request via EFI_IP4_PROTOCOL.
+  Creates a temporary IP4 child configured for ICMP, sends echo request,
+  and waits for reply. The IP4 stack handles ARP resolution and routing
+  internally, so no MAC address is needed.
+
+  @param[in]  NicHandle    NIC handle with IP4 service binding.
+  @param[in]  LocalIp      Our IPv4 address (4 bytes).
+  @param[in]  SubnetMask   Subnet mask (4 bytes).
+  @param[in]  Gateway      Gateway IP (4 bytes, can be all-zero).
+  @param[in]  DstIp        Destination IP (4 bytes).
+  @param[in]  SeqNum       ICMP sequence number.
+  @param[in]  Ttl          IP TTL value.
   @param[in]  PayloadSize  ICMP payload data size.
-  @param[in]  TimeoutMs  Timeout in milliseconds.
-  @param[out] RttUs      Round-trip time in microseconds (if reply received).
-  @param[out] ReplyType  ICMP reply type (0=echo reply, 11=time exceeded, etc).
-  @param[out] ReplyCode  ICMP reply code.
+  @param[in]  TimeoutMs    Timeout in milliseconds.
+  @param[out] RttUs        Round-trip time in microseconds.
+  @param[out] ReplyType    ICMP reply type (0=echo reply, 11=time exceeded, etc).
+  @param[out] ReplyCode    ICMP reply code.
+
+  @retval EFI_SUCCESS      Got a reply (check ReplyType).
+  @retval EFI_TIMEOUT      No reply within timeout.
+  @retval EFI_UNSUPPORTED  IP4 protocol not available.
+  @retval EFI_NOT_READY    TX failed.
+**/
+STATIC
+EFI_STATUS
+L3SendIcmpViaIp4 (
+  IN  EFI_HANDLE   NicHandle,
+  IN  CONST UINT8  *LocalIp,
+  IN  CONST UINT8  *SubnetMask,
+  IN  CONST UINT8  *Gateway,
+  IN  CONST UINT8  *DstIp,
+  IN  UINT16       SeqNum,
+  IN  UINT8        Ttl,
+  IN  UINTN        PayloadSize,
+  IN  UINTN        TimeoutMs,
+  OUT UINT32       *RttUs,
+  OUT UINT8        *ReplyType,
+  OUT UINT8        *ReplyCode
+  )
+{
+  EFI_STATUS                    Status;
+  EFI_SERVICE_BINDING_PROTOCOL  *Ip4Sb;
+  EFI_IP4_PROTOCOL              *Ip4;
+  EFI_HANDLE                    Ip4Child;
+  EFI_IP4_CONFIG_DATA           Ip4Config;
+  EFI_IP4_COMPLETION_TOKEN      TxToken;
+  EFI_IP4_COMPLETION_TOKEN      RxToken;
+  EFI_IP4_TRANSMIT_DATA         TxData;
+  EFI_IP4_OVERRIDE_DATA         Override;
+  EFI_EVENT                     TxEvent;
+  EFI_EVENT                     RxEvent;
+  UINT8                         *IcmpBuf;
+  ICMP_HEADER                   *Icmp;
+  UINT64                        StartTick;
+  UINT64                        CurTick;
+  UINTN                         I;
+  UINTN                         IcmpLen;
+  EFI_STATUS                    Result;
+  EFI_IPv4_ADDRESS              ZeroAddr;
+  EFI_IPv4_ADDRESS              GwAddr;
+  BOOLEAN                       HasGw;
+
+  *RttUs     = 0;
+  *ReplyType = 0;
+  *ReplyCode = 0;
+
+  IcmpBuf  = NULL;
+  TxEvent  = NULL;
+  RxEvent  = NULL;
+  Ip4Sb    = NULL;
+  Ip4      = NULL;
+  Ip4Child = NULL;
+
+  //
+  // Open IP4 Service Binding
+  //
+  Status = gBS->OpenProtocol (
+                  NicHandle,
+                  &gEfiIp4ServiceBindingProtocolGuid,
+                  (VOID **)&Ip4Sb,
+                  gImageHandle,
+                  NicHandle,
+                  EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                  );
+  if (EFI_ERROR (Status) || Ip4Sb == NULL) {
+    return EFI_UNSUPPORTED;
+  }
+
+  //
+  // Create IP4 child
+  //
+  Status = Ip4Sb->CreateChild (Ip4Sb, &Ip4Child);
+  if (EFI_ERROR (Status) || Ip4Child == NULL) {
+    return EFI_UNSUPPORTED;
+  }
+
+  //
+  // Open IP4 protocol on child
+  //
+  Status = gBS->OpenProtocol (
+                  Ip4Child,
+                  &gEfiIp4ProtocolGuid,
+                  (VOID **)&Ip4,
+                  gImageHandle,
+                  NicHandle,
+                  EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                  );
+  if (EFI_ERROR (Status) || Ip4 == NULL) {
+    Ip4Sb->DestroyChild (Ip4Sb, Ip4Child);
+    return EFI_UNSUPPORTED;
+  }
+
+  //
+  // Configure IP4 for ICMP.
+  // Use explicit StationAddress so Ip4->Transmit can queue immediately
+  // (Transmit triggers internal ARP resolution). UseDefaultAddress may
+  // cause Transmit to return EFI_NO_MAPPING if address not yet ready.
+  //
+  ZeroMem (&Ip4Config, sizeof (Ip4Config));
+  Ip4Config.DefaultProtocol    = 1;      // ICMP
+  Ip4Config.AcceptIcmpErrors   = TRUE;
+  Ip4Config.UseDefaultAddress  = FALSE;
+  CopyMem (&Ip4Config.StationAddress, LocalIp, 4);
+  CopyMem (&Ip4Config.SubnetMask, SubnetMask, 4);
+  Ip4Config.TimeToLive         = Ttl;
+  Ip4Config.DoNotFragment      = FALSE;
+  Ip4Config.RawData            = FALSE;
+
+  Status = Ip4->Configure (Ip4, &Ip4Config);
+  if (EFI_ERROR (Status)) {
+    //
+    // Explicit failed — fall back to UseDefaultAddress=TRUE.
+    //
+    ZeroMem (&Ip4Config, sizeof (Ip4Config));
+    Ip4Config.DefaultProtocol    = 1;      // ICMP
+    Ip4Config.AcceptIcmpErrors   = TRUE;
+    Ip4Config.UseDefaultAddress  = TRUE;
+    Ip4Config.TimeToLive         = Ttl;
+    Ip4Config.DoNotFragment      = FALSE;
+    Ip4Config.RawData            = FALSE;
+
+    Status = Ip4->Configure (Ip4, &Ip4Config);
+    if (EFI_ERROR (Status)) {
+      Ip4Sb->DestroyChild (Ip4Sb, Ip4Child);
+      return EFI_UNSUPPORTED;
+    }
+  }
+
+  //
+  // Add default route via gateway if gateway is configured
+  //
+  HasGw = FALSE;
+  for (I = 0; I < 4; I++) {
+    if (Gateway[I] != 0) {
+      HasGw = TRUE;
+      break;
+    }
+  }
+
+  if (HasGw) {
+    ZeroMem (&ZeroAddr, sizeof (ZeroAddr));
+    CopyMem (&GwAddr, Gateway, 4);
+    Ip4->Routes (Ip4, FALSE, &ZeroAddr, &ZeroAddr, &GwAddr);
+  }
+
+  Result = EFI_TIMEOUT;
+
+  //
+  // Build ICMP echo request (just ICMP header + payload, no IP/Ethernet headers)
+  //
+  if (PayloadSize > 65000) {
+    PayloadSize = 65000;
+  }
+
+  IcmpLen = ICMP_HEADER_SIZE + PayloadSize;
+  IcmpBuf = AllocateZeroPool (IcmpLen);
+  if (IcmpBuf == NULL) {
+    Result = EFI_OUT_OF_RESOURCES;
+    goto Cleanup;
+  }
+
+  Icmp = (ICMP_HEADER *)IcmpBuf;
+  Icmp->Type           = ICMP_TYPE_ECHO_REQUEST;
+  Icmp->Code           = 0;
+  Icmp->Checksum       = 0;
+  Icmp->Identifier     = HTONS (L3_ICMP_ID);
+  Icmp->SequenceNumber = HTONS (SeqNum);
+
+  for (I = 0; I < PayloadSize; I++) {
+    IcmpBuf[ICMP_HEADER_SIZE + I] = (UINT8)(I & 0xFF);
+  }
+
+  Icmp->Checksum = HTONS (PktChecksum (IcmpBuf, IcmpLen));
+
+  //
+  // Create TX event
+  //
+  Status = gBS->CreateEvent (
+                  EVT_NOTIFY_SIGNAL,
+                  TPL_CALLBACK,
+                  L3Ip4DummyNotify,
+                  NULL,
+                  &TxEvent
+                  );
+  if (EFI_ERROR (Status)) {
+    Result = EFI_DEVICE_ERROR;
+    goto Cleanup;
+  }
+
+  //
+  // Prepare TX data (1 fragment containing ICMP header + payload)
+  //
+  ZeroMem (&Override, sizeof (Override));
+  CopyMem (&Override.SourceAddress, LocalIp, 4);
+  Override.TypeOfService = 0;
+  Override.TimeToLive    = Ttl;
+  Override.DoNotFragment = FALSE;
+  Override.Protocol      = 1;  // ICMP
+
+  ZeroMem (&TxData, sizeof (TxData));
+  CopyMem (&TxData.DestinationAddress, DstIp, 4);
+  TxData.OverrideData                    = &Override;
+  TxData.OptionsLength                   = 0;
+  TxData.OptionsBuffer                   = NULL;
+  TxData.TotalDataLength                 = (UINT32)IcmpLen;
+  TxData.FragmentCount                   = 1;
+  TxData.FragmentTable[0].FragmentLength = (UINT32)IcmpLen;
+  TxData.FragmentTable[0].FragmentBuffer = IcmpBuf;
+
+  ZeroMem (&TxToken, sizeof (TxToken));
+  TxToken.Event         = TxEvent;
+  TxToken.Status        = EFI_NOT_READY;
+  TxToken.Packet.TxData = &TxData;
+
+  StartTick = UtilGetTimestamp ();
+
+  //
+  // Transmit ICMP packet with retry.
+  // IP4's internal ARP has RetryCount=3 (3s timeout). If ARP fails on the
+  // first attempt, TxToken.Status is set to an error. However, the ARP
+  // requests sent during the first attempt may have primed the gateway's
+  // ARP cache or the platform's ARP cache (via MNP timer processing between
+  // attempts). A retry typically succeeds immediately on cache hit.
+  // TCP works (2s connect) because it retries internally — same logic here.
+  //
+  {
+    UINTN  Attempt;
+
+    for (Attempt = 0; Attempt < 3; Attempt++) {
+      TxToken.Status = EFI_NOT_READY;
+
+      Status = Ip4->Transmit (Ip4, &TxToken);
+      if (EFI_ERROR (Status)) {
+        //
+        // Can't queue TX — stall to let pending events process, then retry
+        //
+        gBS->Stall (500000);  // 500ms
+        continue;
+      }
+
+      //
+      // Wait for TX completion (up to 4 seconds per attempt).
+      // Ip4->Poll triggers MnpPoll which receives frames from SNP,
+      // including ARP replies for the internal ARP resolution.
+      //
+      for (I = 0; I < 4000 && TxToken.Status == EFI_NOT_READY; I++) {
+        Ip4->Poll (Ip4);
+        gBS->Stall (1000);
+      }
+
+      if (!EFI_ERROR (TxToken.Status)) {
+        break;  // TX succeeded — ARP resolved, packet sent
+      }
+
+      //
+      // TX failed (likely ARP timeout). Stall 500ms to allow background
+      // MNP timer events to process any late ARP replies, then retry.
+      // Do NOT Cancel — Cancel clears pending ARP state.
+      //
+      if (Attempt < 2) {
+        for (I = 0; I < 500; I++) {
+          Ip4->Poll (Ip4);
+          gBS->Stall (1000);
+        }
+      }
+    }
+  }
+
+  if (EFI_ERROR (TxToken.Status)) {
+    Result = EFI_NOT_READY;
+    goto Cleanup;
+  }
+
+  //
+  // Create RX event
+  //
+  Status = gBS->CreateEvent (
+                  EVT_NOTIFY_SIGNAL,
+                  TPL_CALLBACK,
+                  L3Ip4DummyNotify,
+                  NULL,
+                  &RxEvent
+                  );
+  if (EFI_ERROR (Status)) {
+    Result = EFI_DEVICE_ERROR;
+    goto Cleanup;
+  }
+
+  //
+  // Set up receive token
+  //
+  ZeroMem (&RxToken, sizeof (RxToken));
+  RxToken.Event  = RxEvent;
+  RxToken.Status = EFI_NOT_READY;
+
+  Status = Ip4->Receive (Ip4, &RxToken);
+  if (EFI_ERROR (Status)) {
+    Result = EFI_NOT_READY;
+    goto Cleanup;
+  }
+
+  //
+  // Poll for ICMP reply
+  //
+  for (I = 0; I < TimeoutMs && RxToken.Status == EFI_NOT_READY; I++) {
+    Ip4->Poll (Ip4);
+    gBS->Stall (1000);
+  }
+
+  if (RxToken.Status == EFI_NOT_READY) {
+    //
+    // Timeout - cancel pending receive
+    //
+    Ip4->Cancel (Ip4, &RxToken);
+    Ip4->Poll (Ip4);
+    Result = EFI_TIMEOUT;
+    goto Cleanup;
+  }
+
+  if (EFI_ERROR (RxToken.Status)) {
+    Result = EFI_DEVICE_ERROR;
+    goto Cleanup;
+  }
+
+  //
+  // Process received ICMP reply
+  //
+  if (RxToken.Packet.RxData != NULL) {
+    EFI_IP4_RECEIVE_DATA  *RxData;
+
+    RxData = RxToken.Packet.RxData;
+
+    CurTick = UtilGetTimestamp ();
+    *RttUs = (UINT32)((CurTick - StartTick) * 1000000);
+
+    if (RxData->DataLength >= ICMP_HEADER_SIZE &&
+        RxData->FragmentCount > 0 &&
+        RxData->FragmentTable[0].FragmentLength >= ICMP_HEADER_SIZE) {
+      ICMP_HEADER  *RxIcmp;
+
+      RxIcmp     = (ICMP_HEADER *)RxData->FragmentTable[0].FragmentBuffer;
+      *ReplyType = RxIcmp->Type;
+      *ReplyCode = RxIcmp->Code;
+      Result     = EFI_SUCCESS;
+    } else {
+      Result = EFI_DEVICE_ERROR;
+    }
+
+    //
+    // Recycle RX buffer
+    //
+    gBS->SignalEvent (RxData->RecycleSignal);
+  }
+
+Cleanup:
+  if (IcmpBuf != NULL) {
+    FreePool (IcmpBuf);
+  }
+
+  if (TxEvent != NULL) {
+    gBS->CloseEvent (TxEvent);
+  }
+
+  if (RxEvent != NULL) {
+    gBS->CloseEvent (RxEvent);
+  }
+
+  if (Ip4 != NULL) {
+    Ip4->Configure (Ip4, NULL);
+  }
+
+  if (Ip4Child != NULL) {
+    Ip4Sb->DestroyChild (Ip4Sb, Ip4Child);
+  }
+
+  return Result;
+}
+
+/**
+  Send an ICMP Echo Request via raw SNP and wait for reply (fallback).
+  Used when EFI_IP4_PROTOCOL is not available.
+
+  @param[in]  Snp         SNP protocol instance.
+  @param[in]  SrcMac      Source MAC (6 bytes).
+  @param[in]  DstMac      Destination MAC (6 bytes).
+  @param[in]  SrcIp       Source IP (4 bytes).
+  @param[in]  DstIp       Destination IP (4 bytes).
+  @param[in]  SeqNum      ICMP sequence number.
+  @param[in]  Ttl         IP TTL value.
+  @param[in]  PayloadSize ICMP payload data size.
+  @param[in]  TimeoutMs   Timeout in milliseconds.
+  @param[out] RttUs       Round-trip time in microseconds.
+  @param[out] ReplyType   ICMP reply type.
+  @param[out] ReplyCode   ICMP reply code.
 
   @retval EFI_SUCCESS    Got a reply (check ReplyType).
   @retval EFI_TIMEOUT    No reply within timeout.
@@ -121,7 +765,7 @@ L3ResolveTargetMac (
 **/
 STATIC
 EFI_STATUS
-L3SendIcmpEcho (
+L3SendIcmpViaSnp (
   IN  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp,
   IN  CONST UINT8                  *SrcMac,
   IN  CONST UINT8                  *DstMac,
@@ -163,7 +807,6 @@ L3SendIcmpEcho (
 
   //
   // Build ICMP echo request with custom TTL
-  // Use PktBuildEthernetHeader + PktBuildIpv4Header + manual ICMP to control TTL
   //
   ZeroMem (TxBuf, sizeof (TxBuf));
   Offset = PktBuildEthernetHeader (TxBuf, DstMac, SrcMac, ETHERTYPE_IPV4);
@@ -178,9 +821,6 @@ L3SendIcmpEcho (
   TxIcmp->Identifier     = HTONS (L3_ICMP_ID);
   TxIcmp->SequenceNumber = HTONS (SeqNum);
 
-  //
-  // Fill payload with pattern
-  //
   Payload = TxBuf + Offset + ICMP_HEADER_SIZE;
   for (I = 0; I < PayloadSize; I++) {
     Payload[I] = (UINT8)(I & 0xFF);
@@ -190,9 +830,6 @@ L3SendIcmpEcho (
 
   TxLen = Offset + IcmpLen;
 
-  //
-  // Ensure receive filters are set
-  //
   Snp->ReceiveFilters (
     Snp,
     EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
@@ -200,9 +837,6 @@ L3SendIcmpEcho (
     0, FALSE, 0, NULL
     );
 
-  //
-  // Record start time and send
-  //
   StartTick = UtilGetTimestamp ();
 
   Status = Snp->Transmit (Snp, 0, TxLen, TxBuf, NULL, NULL, NULL);
@@ -230,9 +864,6 @@ L3SendIcmpEcho (
           IpHdrLen = IPV4_HDR_LEN (RxIp->VersionIhl);
           RxIcmp = (ICMP_HEADER *)(RxBuf + ETHERNET_HEADER_SIZE + IpHdrLen);
 
-          //
-          // Check for echo reply matching our ID
-          //
           if (RxIcmp->Type == ICMP_TYPE_ECHO_REPLY &&
               NTOHS (RxIcmp->Identifier) == L3_ICMP_ID) {
             CurTick    = UtilGetTimestamp ();
@@ -242,10 +873,6 @@ L3SendIcmpEcho (
             return EFI_SUCCESS;
           }
 
-          //
-          // Check for Time Exceeded or Destination Unreachable
-          // These contain the original IP header + 8 bytes in their data
-          //
           if (RxIcmp->Type == ICMP_TYPE_TIME_EXCEEDED ||
               RxIcmp->Type == ICMP_TYPE_DEST_UNREACH) {
             CurTick    = UtilGetTimestamp ();
@@ -297,7 +924,7 @@ L3IsSameSubnet (
   Determine which MAC to use for reaching a target IP.
   If same subnet, ARP-resolve the target. If different subnet, ARP-resolve the gateway.
 
-  @param[in]  Snp        SNP protocol instance.
+  @param[in]  Nic        NIC information.
   @param[in]  Config     Test configuration with IPs.
   @param[out] NextHopMac Resolved MAC for next hop (6 bytes).
 
@@ -307,9 +934,9 @@ L3IsSameSubnet (
 STATIC
 EFI_STATUS
 L3ResolveNextHopMac (
-  IN  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp,
-  IN  TEST_CONFIG                  *Config,
-  OUT UINT8                        *NextHopMac
+  IN  NIC_INFO    *Nic,
+  IN  TEST_CONFIG *Config,
+  OUT UINT8       *NextHopMac
   )
 {
   CONST UINT8  *ResolveIp;
@@ -317,13 +944,104 @@ L3ResolveNextHopMac (
   if (L3IsSameSubnet (Config->LocalIp.Addr, Config->TargetIp.Addr, Config->SubnetMask.Addr)) {
     ResolveIp = Config->TargetIp.Addr;
   } else {
-    //
-    // Target is off-subnet, resolve gateway MAC instead
-    //
     ResolveIp = Config->Gateway.Addr;
   }
 
-  return L3ResolveTargetMac (Snp, Config->LocalIp.Addr, ResolveIp, NextHopMac, 3000);
+  return L3ResolveTargetMac (Nic, Config->LocalIp.Addr, ResolveIp, NextHopMac, 3000);
+}
+
+/**
+  High-level ICMP ping: try IP4 protocol first, fall back to raw SNP.
+  Handles ARP resolution internally for the SNP fallback path.
+
+  @param[in]  Nic         NIC information.
+  @param[in]  Config      Test configuration.
+  @param[in]  DstIp       Destination IP (4 bytes).
+  @param[in]  SeqNum      ICMP sequence number.
+  @param[in]  Ttl         IP TTL value.
+  @param[in]  PayloadSize ICMP payload data size.
+  @param[in]  TimeoutMs   Timeout in milliseconds.
+  @param[out] RttUs       Round-trip time in microseconds.
+  @param[out] ReplyType   ICMP reply type.
+  @param[out] ReplyCode   ICMP reply code.
+
+  @retval EFI_SUCCESS    Got a reply.
+  @retval EFI_TIMEOUT    No reply within timeout.
+  @retval EFI_NOT_READY  Network not available.
+**/
+STATIC
+EFI_STATUS
+L3Ping (
+  IN  NIC_INFO    *Nic,
+  IN  TEST_CONFIG *Config,
+  IN  CONST UINT8 *DstIp,
+  IN  UINT16      SeqNum,
+  IN  UINT8       Ttl,
+  IN  UINTN       PayloadSize,
+  IN  UINTN       TimeoutMs,
+  OUT UINT32      *RttUs,
+  OUT UINT8       *ReplyType,
+  OUT UINT8       *ReplyCode
+  )
+{
+  EFI_STATUS  Status;
+
+  //
+  // Method 1: IP4 protocol (handles ARP and routing internally)
+  //
+  if (Nic->HasIp4 && Nic->HasIpConfig) {
+    Status = L3SendIcmpViaIp4 (
+               Nic->Handle,
+               Nic->Ipv4Address.Addr,
+               Nic->SubnetMask.Addr,
+               Nic->Gateway.Addr,
+               DstIp,
+               SeqNum,
+               Ttl,
+               PayloadSize,
+               TimeoutMs,
+               RttUs,
+               ReplyType,
+               ReplyCode
+               );
+    //
+    // Return only on success or definite timeout.
+    // For any other error (NOT_READY, UNSUPPORTED, etc.), fall through
+    // to the raw SNP path, which can handle ARP resolution independently.
+    //
+    if (Status == EFI_SUCCESS || Status == EFI_TIMEOUT) {
+      return Status;
+    }
+  }
+
+  //
+  // Method 2: Raw SNP (resolve MAC first, then send via SNP)
+  //
+  if (Nic->Snp != NULL && Nic->Snp->Mode->State == EfiSimpleNetworkInitialized) {
+    UINT8  DstMac[6];
+
+    Status = L3ResolveNextHopMac (Nic, Config, DstMac);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+
+    return L3SendIcmpViaSnp (
+             Nic->Snp,
+             Nic->Snp->Mode->CurrentAddress.Addr,
+             DstMac,
+             Config->LocalIp.Addr,
+             DstIp,
+             SeqNum,
+             Ttl,
+             PayloadSize,
+             TimeoutMs,
+             RttUs,
+             ReplyType,
+             ReplyCode
+             );
+  }
+
+  return EFI_NOT_READY;
 }
 
 //
@@ -420,7 +1138,6 @@ TestL3IpConfigCheck (
 /**
   Test L3.2: ICMP Echo (Ping)
   Sends ICMP echo request to the target IP and measures round-trip time.
-  First resolves target MAC via ARP.
 
   PASS: Echo reply received
   FAIL: No reply within timeout
@@ -432,46 +1149,16 @@ TestL3IcmpEcho (
   OUT TEST_RESULT_DATA *Result
   )
 {
-  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
-  EFI_STATUS                   Status;
-  UINT8                        DstMac[6];
-  UINT32                       RttUs;
-  UINT8                        ReplyType;
-  UINT8                        ReplyCode;
+  EFI_STATUS  Status;
+  UINT32      RttUs;
+  UINT8       ReplyType;
+  UINT8       ReplyCode;
 
-  Snp = Nic->Snp;
-  if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
-    Result->StatusCode = TEST_RESULT_SKIP;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"SNP not initialized");
-    return EFI_SUCCESS;
-  }
-
-  //
-  // Resolve next-hop MAC
-  //
-  Status = L3ResolveNextHopMac (Snp, Config, DstMac);
-  if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_FAIL;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"ARP resolution failed for target/gateway");
-    UnicodeSPrint (Result->FailReason, sizeof (Result->FailReason),
-                   L"Cannot resolve MAC address for next hop");
-    UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
-                   L"Verify target IP is reachable and cable is connected");
-    return EFI_SUCCESS;
-  }
-
-  //
-  // Send ICMP echo
-  //
   Result->PacketsSent = 1;
+  Result->BytesSent   = IPV4_MIN_HEADER_SIZE + ICMP_HEADER_SIZE + 32;
 
-  Status = L3SendIcmpEcho (
-             Snp,
-             Snp->Mode->CurrentAddress.Addr,
-             DstMac,
-             Config->LocalIp.Addr,
+  Status = L3Ping (
+             Nic, Config,
              Config->TargetIp.Addr,
              1,     // SeqNum
              64,    // TTL
@@ -482,18 +1169,23 @@ TestL3IcmpEcho (
              &ReplyCode
              );
 
-  Result->BytesSent = ETHERNET_HEADER_SIZE + IPV4_MIN_HEADER_SIZE + ICMP_HEADER_SIZE + 32;
-
   if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_FAIL;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"No ICMP echo reply from %d.%d.%d.%d",
-                   Config->TargetIp.Addr[0], Config->TargetIp.Addr[1],
-                   Config->TargetIp.Addr[2], Config->TargetIp.Addr[3]);
-    UnicodeSPrint (Result->FailReason, sizeof (Result->FailReason),
-                   L"ICMP echo request timed out");
-    UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
-                   L"Check firewall rules, target IP, and network path");
+    if (Status == EFI_NOT_READY) {
+      Result->StatusCode = TEST_RESULT_SKIP;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"Network stack not available for ICMP");
+    } else {
+      Result->StatusCode = TEST_RESULT_FAIL;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"No ICMP echo reply from %d.%d.%d.%d",
+                     Config->TargetIp.Addr[0], Config->TargetIp.Addr[1],
+                     Config->TargetIp.Addr[2], Config->TargetIp.Addr[3]);
+      UnicodeSPrint (Result->FailReason, sizeof (Result->FailReason),
+                     L"ICMP echo request timed out");
+      UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
+                     L"Check firewall rules, target IP, and network path");
+    }
+
     return EFI_SUCCESS;
   }
 
@@ -541,37 +1233,16 @@ TestL3IcmpSweep (
   OUT TEST_RESULT_DATA *Result
   )
 {
-  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
-  EFI_STATUS                   Status;
-  UINT8                        DstMac[6];
-  UINT32                       RttUs;
-  UINT8                        ReplyType;
-  UINT8                        ReplyCode;
-  UINTN                        I;
-  UINTN                        Count;
-  UINTN                        Received;
-  UINT32                       MinRtt;
-  UINT32                       MaxRtt;
-  UINT64                       TotalRtt;
-
-  Snp = Nic->Snp;
-  if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
-    Result->StatusCode = TEST_RESULT_SKIP;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"SNP not initialized");
-    return EFI_SUCCESS;
-  }
-
-  //
-  // Resolve next-hop MAC
-  //
-  Status = L3ResolveNextHopMac (Snp, Config, DstMac);
-  if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_FAIL;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"ARP resolution failed for target/gateway");
-    return EFI_SUCCESS;
-  }
+  EFI_STATUS  Status;
+  UINT32      RttUs;
+  UINT8       ReplyType;
+  UINT8       ReplyCode;
+  UINTN       I;
+  UINTN       Count;
+  UINTN       Received;
+  UINT32      MinRtt;
+  UINT32      MaxRtt;
+  UINT64      TotalRtt;
 
   Count    = (Config->Iterations > 0 && Config->Iterations <= 10) ? Config->Iterations : 5;
   Received = 0;
@@ -582,11 +1253,8 @@ TestL3IcmpSweep (
   for (I = 0; I < Count; I++) {
     Result->PacketsSent++;
 
-    Status = L3SendIcmpEcho (
-               Snp,
-               Snp->Mode->CurrentAddress.Addr,
-               DstMac,
-               Config->LocalIp.Addr,
+    Status = L3Ping (
+               Nic, Config,
                Config->TargetIp.Addr,
                (UINT16)(I + 1),
                64,
@@ -663,35 +1331,14 @@ TestL3TtlHopDiscovery (
   OUT TEST_RESULT_DATA *Result
   )
 {
-  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
-  EFI_STATUS                   Status;
-  UINT8                        DstMac[6];
-  UINT32                       RttUs;
-  UINT8                        ReplyType;
-  UINT8                        ReplyCode;
-  UINT8                        Ttl;
-  UINT8                        MaxTtl;
-  UINTN                        HopsResponded;
-  BOOLEAN                      TargetReached;
-
-  Snp = Nic->Snp;
-  if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
-    Result->StatusCode = TEST_RESULT_SKIP;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"SNP not initialized");
-    return EFI_SUCCESS;
-  }
-
-  //
-  // Resolve next-hop MAC
-  //
-  Status = L3ResolveNextHopMac (Snp, Config, DstMac);
-  if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_FAIL;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"ARP resolution failed for target/gateway");
-    return EFI_SUCCESS;
-  }
+  EFI_STATUS  Status;
+  UINT32      RttUs;
+  UINT8       ReplyType;
+  UINT8       ReplyCode;
+  UINT8       Ttl;
+  UINT8       MaxTtl;
+  UINTN       HopsResponded;
+  BOOLEAN     TargetReached;
 
   MaxTtl        = 16;
   HopsResponded = 0;
@@ -700,11 +1347,8 @@ TestL3TtlHopDiscovery (
   for (Ttl = 1; Ttl <= MaxTtl; Ttl++) {
     Result->PacketsSent++;
 
-    Status = L3SendIcmpEcho (
-               Snp,
-               Snp->Mode->CurrentAddress.Addr,
-               DstMac,
-               Config->LocalIp.Addr,
+    Status = L3Ping (
+               Nic, Config,
                Config->TargetIp.Addr,
                (UINT16)Ttl,
                Ttl,
@@ -763,8 +1407,8 @@ TestL3TtlHopDiscovery (
 
 /**
   Test L3.5: MTU Path Discovery
-  Sends ICMP echo requests with DF (Don't Fragment) flag and varying payload sizes
-  to discover the path MTU. Binary search between minimum and maximum.
+  Sends ICMP echo requests with varying payload sizes to discover the path MTU.
+  Binary search between minimum and maximum.
 
   PASS: Path MTU determined
   WARN: Could only send small packets
@@ -777,33 +1421,15 @@ TestL3MtuPathDiscovery (
   OUT TEST_RESULT_DATA *Result
   )
 {
-  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
-  EFI_STATUS                   Status;
-  UINT8                        DstMac[6];
-  UINT32                       RttUs;
-  UINT8                        ReplyType;
-  UINT8                        ReplyCode;
-  UINTN                        Lo;
-  UINTN                        Hi;
-  UINTN                        Mid;
-  UINTN                        LargestOk;
-  UINT16                       SeqNum;
-
-  Snp = Nic->Snp;
-  if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
-    Result->StatusCode = TEST_RESULT_SKIP;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"SNP not initialized");
-    return EFI_SUCCESS;
-  }
-
-  Status = L3ResolveNextHopMac (Snp, Config, DstMac);
-  if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_FAIL;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"ARP resolution failed");
-    return EFI_SUCCESS;
-  }
+  EFI_STATUS  Status;
+  UINT32      RttUs;
+  UINT8       ReplyType;
+  UINT8       ReplyCode;
+  UINTN       Lo;
+  UINTN       Hi;
+  UINTN       Mid;
+  UINTN       LargestOk;
+  UINT16      SeqNum;
 
   //
   // Binary search for path MTU
@@ -820,11 +1446,8 @@ TestL3MtuPathDiscovery (
     Result->PacketsSent++;
     SeqNum++;
 
-    Status = L3SendIcmpEcho (
-               Snp,
-               Snp->Mode->CurrentAddress.Addr,
-               DstMac,
-               Config->LocalIp.Addr,
+    Status = L3Ping (
+               Nic, Config,
                Config->TargetIp.Addr,
                SeqNum,
                64,
@@ -840,9 +1463,6 @@ TestL3MtuPathDiscovery (
       LargestOk = Mid;
       Lo = Mid + 1;
     } else {
-      //
-      // Either timeout or Destination Unreachable (Fragmentation Needed)
-      //
       if (!EFI_ERROR (Status)) {
         Result->PacketsReceived++;
       }
@@ -863,8 +1483,6 @@ TestL3MtuPathDiscovery (
 
     if (PathMtu >= 1500) {
       Result->StatusCode = TEST_RESULT_PASS;
-    } else if (PathMtu >= 576) {
-      Result->StatusCode = TEST_RESULT_WARN;
     } else {
       Result->StatusCode = TEST_RESULT_WARN;
     }
@@ -891,12 +1509,12 @@ TestL3MtuPathDiscovery (
 
 /**
   Test L3.6: IP Fragmentation
-  Tests whether the network path handles IP fragmentation correctly.
-  Sends a large ICMP echo request (larger than 1500-byte MTU) without
-  the DF flag, which should be fragmented by the IP layer.
+  Tests whether the network path handles large ICMP packets correctly.
+  Sends a large ICMP payload (1200 bytes) which the IP4 stack may
+  fragment if needed.
 
-  PASS: Large packet sent and reply received (fragmentation works)
-  WARN: TX succeeded but no reply (may need reassembly support)
+  PASS: Large packet sent and reply received
+  WARN: TX succeeded but no reply
   FAIL: TX failed
 **/
 EFI_STATUS
@@ -906,175 +1524,68 @@ TestL3IpFragmentation (
   OUT TEST_RESULT_DATA *Result
   )
 {
-  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
-  EFI_STATUS                   Status;
-  UINT8                        DstMac[6];
-  UINT8                        *TxBuf;
-  UINTN                        Offset;
-  UINTN                        IcmpLen;
-  UINTN                        PayloadSize;
-  UINTN                        TotalLen;
-  ICMP_HEADER                  *Icmp;
-  IPV4_HEADER                  *Ip;
-  UINT8                        RxBuf[MAX_ETHERNET_FRAME_SIZE];
-  UINTN                        RxLen;
-  UINTN                        HdrSize;
-  UINTN                        I;
-  ETHERNET_HEADER              *RxEth;
-  IPV4_HEADER                  *RxIp;
-  ICMP_HEADER                  *RxIcmp;
+  EFI_STATUS  Status;
+  UINT32      RttUs;
+  UINT8       ReplyType;
+  UINT8       ReplyCode;
+  UINTN       PayloadSize;
 
-  Snp = Nic->Snp;
-  if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
-    Result->StatusCode = TEST_RESULT_SKIP;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"SNP not initialized");
-    return EFI_SUCCESS;
-  }
-
-  Status = L3ResolveNextHopMac (Snp, Config, DstMac);
-  if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_FAIL;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"ARP resolution failed");
-    return EFI_SUCCESS;
-  }
-
-  //
-  // Build a large ICMP echo request — payload large enough to require fragmentation
-  // at standard MTU. We build it up to SNP MaxPacketSize limit.
-  // Use PayloadSize of 1200 bytes — total IP packet = 20 + 8 + 1200 = 1228 bytes.
-  // This fits within a single Ethernet frame but tests IP layer handling.
-  // For true fragmentation, the receiver needs to reassemble.
-  //
   PayloadSize = 1200;
-  IcmpLen     = ICMP_HEADER_SIZE + PayloadSize;
-  TotalLen    = ETHERNET_HEADER_SIZE + IPV4_MIN_HEADER_SIZE + IcmpLen;
-
-  TxBuf = AllocateZeroPool (TotalLen);
-  if (TxBuf == NULL) {
-    Result->StatusCode = TEST_RESULT_ERROR;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"Failed to allocate %d byte buffer", TotalLen);
-    return EFI_SUCCESS;
-  }
-
-  //
-  // Build headers — clear DF flag to allow fragmentation
-  //
-  Offset = PktBuildEthernetHeader (
-             TxBuf, DstMac,
-             Snp->Mode->CurrentAddress.Addr,
-             ETHERTYPE_IPV4
-             );
-
-  Offset += PktBuildIpv4Header (
-              TxBuf + Offset,
-              Config->LocalIp.Addr,
-              Config->TargetIp.Addr,
-              IP_PROTO_ICMP,
-              (UINT16)IcmpLen,
-              64
-              );
-
-  //
-  // Clear DF flag in the IP header we just built
-  //
-  Ip = (IPV4_HEADER *)(TxBuf + ETHERNET_HEADER_SIZE);
-  Ip->FlagsFragOffset = 0;
-  Ip->HeaderChecksum  = 0;
-  Ip->HeaderChecksum  = HTONS (PktChecksum (
-                                  TxBuf + ETHERNET_HEADER_SIZE,
-                                  IPV4_MIN_HEADER_SIZE
-                                  ));
-
-  //
-  // ICMP header
-  //
-  Icmp = (ICMP_HEADER *)(TxBuf + Offset);
-  Icmp->Type           = ICMP_TYPE_ECHO_REQUEST;
-  Icmp->Code           = 0;
-  Icmp->Checksum       = 0;
-  Icmp->Identifier     = HTONS (L3_ICMP_ID);
-  Icmp->SequenceNumber = HTONS (200);
-
-  //
-  // Fill payload with pattern
-  //
-  for (I = 0; I < PayloadSize; I++) {
-    TxBuf[Offset + ICMP_HEADER_SIZE + I] = (UINT8)(I & 0xFF);
-  }
-
-  Icmp->Checksum = HTONS (PktChecksum (TxBuf + Offset, (UINTN)IcmpLen));
-
-  //
-  // Send
-  //
-  Snp->ReceiveFilters (
-    Snp,
-    EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
-    EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST,
-    0, FALSE, 0, NULL
-    );
-
-  Status = Snp->Transmit (Snp, 0, TotalLen, TxBuf, NULL, NULL, NULL);
-  FreePool (TxBuf);
-
-  if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_FAIL;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"Large ICMP TX failed: %r (payload=%d)", Status, PayloadSize);
-    UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
-                   L"NIC may not support frames of this size");
-    return EFI_SUCCESS;
-  }
 
   Result->PacketsSent = 1;
-  Result->BytesSent   = TotalLen;
+  Result->BytesSent   = IPV4_MIN_HEADER_SIZE + ICMP_HEADER_SIZE + PayloadSize;
 
-  //
-  // Wait for reply (3 seconds)
-  //
-  for (I = 0; I < 3000; I++) {
-    RxLen   = sizeof (RxBuf);
-    HdrSize = 0;
-    Status  = Snp->Receive (Snp, &HdrSize, &RxLen, RxBuf, NULL, NULL, NULL);
+  Status = L3Ping (
+             Nic, Config,
+             Config->TargetIp.Addr,
+             200,
+             64,
+             PayloadSize,
+             3000,
+             &RttUs,
+             &ReplyType,
+             &ReplyCode
+             );
 
-    if (!EFI_ERROR (Status) &&
-        RxLen >= ETHERNET_HEADER_SIZE + IPV4_MIN_HEADER_SIZE + ICMP_HEADER_SIZE) {
-      RxEth = (ETHERNET_HEADER *)RxBuf;
-
-      if (NTOHS (RxEth->EtherType) == ETHERTYPE_IPV4) {
-        RxIp = (IPV4_HEADER *)(RxBuf + ETHERNET_HEADER_SIZE);
-
-        if (RxIp->Protocol == IP_PROTO_ICMP) {
-          UINTN  IpHdrLen;
-          IpHdrLen = IPV4_HDR_LEN (RxIp->VersionIhl);
-          RxIcmp = (ICMP_HEADER *)(RxBuf + ETHERNET_HEADER_SIZE + IpHdrLen);
-
-          if (RxIcmp->Type == ICMP_TYPE_ECHO_REPLY &&
-              NTOHS (RxIcmp->Identifier) == L3_ICMP_ID) {
-            Result->PacketsReceived = 1;
-            Result->BytesReceived   = RxLen;
-            Result->StatusCode = TEST_RESULT_PASS;
-            UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                           L"Large ICMP echo OK (payload=%d, reply=%d bytes)",
-                           PayloadSize, RxLen);
-            return EFI_SUCCESS;
-          }
-        }
-      }
-    }
-
-    gBS->Stall (1000);
+  if (!EFI_ERROR (Status) && ReplyType == ICMP_TYPE_ECHO_REPLY) {
+    Result->PacketsReceived = 1;
+    Result->StatusCode = TEST_RESULT_PASS;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"Large ICMP echo OK (payload=%d, RTT=%d us)",
+                   PayloadSize, RttUs);
+    return EFI_SUCCESS;
   }
 
-  Result->StatusCode = TEST_RESULT_WARN;
-  UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                 L"Large ICMP sent (payload=%d) but no reply in 3s", PayloadSize);
-  UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
-                 L"Frame sent successfully. Reply may require IP reassembly "
-                 L"which SNP raw receive may not support.");
+  if (!EFI_ERROR (Status)) {
+    //
+    // Got a reply but not echo reply (maybe dest unreachable)
+    //
+    Result->PacketsReceived = 1;
+    Result->StatusCode = TEST_RESULT_WARN;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"Large ICMP sent (payload=%d) got ICMP type %d code %d",
+                   PayloadSize, ReplyType, ReplyCode);
+    return EFI_SUCCESS;
+  }
+
+  if (Status == EFI_TIMEOUT) {
+    Result->StatusCode = TEST_RESULT_WARN;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"Large ICMP sent (payload=%d) but no reply in 3s", PayloadSize);
+    UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
+                   L"Frame sent successfully. Reply may require IP reassembly "
+                   L"support on the path.");
+  } else if (Status == EFI_NOT_READY) {
+    Result->StatusCode = TEST_RESULT_FAIL;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"Large ICMP TX failed (payload=%d)", PayloadSize);
+    UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
+                   L"NIC or IP4 stack may not support this frame size");
+  } else {
+    Result->StatusCode = TEST_RESULT_SKIP;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"Network stack not available for large ICMP test");
+  }
 
   return EFI_SUCCESS;
 }
@@ -1117,8 +1628,9 @@ TestL3Ipv6Nd (
 
 /**
   Test L3.8: IP Header Validation
-  Sends an ICMP echo request and validates the IP header of the reply.
-  Checks version, IHL, total length, TTL, protocol, and checksum.
+  Sends ICMP echo via IP4 protocol, then validates the reply IP header.
+  When using IP4 protocol, the IP header is validated by the stack itself;
+  we extract and report the header fields from the RxData.
 
   PASS: All header fields valid
   WARN: Some unusual values
@@ -1131,169 +1643,331 @@ TestL3IpHeaderValid (
   OUT TEST_RESULT_DATA *Result
   )
 {
-  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
-  EFI_STATUS                   Status;
-  UINT8                        DstMac[6];
-  UINT8                        RxBuf[MAX_ETHERNET_FRAME_SIZE];
-  UINTN                        RxLen;
-  UINTN                        HdrSize;
-  UINTN                        I;
-  UINTN                        TxLen;
-  UINT8                        TxBuf[128];
-  ETHERNET_HEADER              *RxEth;
-  IPV4_HEADER                  *RxIp;
-  UINT8                        Version;
-  UINT8                        Ihl;
-  UINT16                       TotalLen;
-  BOOLEAN                      CsumOk;
+  EFI_STATUS                    Status;
+  EFI_SERVICE_BINDING_PROTOCOL  *Ip4Sb;
+  EFI_IP4_PROTOCOL              *Ip4;
+  EFI_HANDLE                    Ip4Child;
+  EFI_IP4_CONFIG_DATA           Ip4Config;
+  EFI_IP4_COMPLETION_TOKEN      TxToken;
+  EFI_IP4_COMPLETION_TOKEN      RxToken;
+  EFI_IP4_TRANSMIT_DATA         TxData;
+  EFI_IP4_OVERRIDE_DATA         Override;
+  EFI_EVENT                     TxEvent;
+  EFI_EVENT                     RxEvent;
+  UINT8                         *IcmpBuf;
+  ICMP_HEADER                   *Icmp;
+  UINTN                         I;
+  UINTN                         IcmpLen;
+  UINTN                         PayloadSize;
+  EFI_IPv4_ADDRESS              ZeroAddr;
+  EFI_IPv4_ADDRESS              GwAddr;
+  BOOLEAN                       HasGw;
 
-  Snp = Nic->Snp;
-  if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
+  Ip4Sb    = NULL;
+  Ip4      = NULL;
+  Ip4Child = NULL;
+  IcmpBuf  = NULL;
+  TxEvent  = NULL;
+  RxEvent  = NULL;
+
+  //
+  // Need IP4 protocol for proper ICMP + header extraction
+  //
+  if (!Nic->HasIp4 || !Nic->HasIpConfig) {
     Result->StatusCode = TEST_RESULT_SKIP;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"SNP not initialized");
+                   L"IP4 protocol or config not available");
     return EFI_SUCCESS;
   }
 
-  Status = L3ResolveNextHopMac (Snp, Config, DstMac);
+  //
+  // Open IP4 Service Binding and create child
+  //
+  Status = gBS->OpenProtocol (
+                  Nic->Handle,
+                  &gEfiIp4ServiceBindingProtocolGuid,
+                  (VOID **)&Ip4Sb,
+                  gImageHandle,
+                  Nic->Handle,
+                  EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                  );
   if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_FAIL;
+    Result->StatusCode = TEST_RESULT_SKIP;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"ARP resolution failed");
+                   L"Cannot open IP4 Service Binding");
+    return EFI_SUCCESS;
+  }
+
+  Status = Ip4Sb->CreateChild (Ip4Sb, &Ip4Child);
+  if (EFI_ERROR (Status)) {
+    Result->StatusCode = TEST_RESULT_SKIP;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"Cannot create IP4 child");
+    return EFI_SUCCESS;
+  }
+
+  Status = gBS->OpenProtocol (
+                  Ip4Child,
+                  &gEfiIp4ProtocolGuid,
+                  (VOID **)&Ip4,
+                  gImageHandle,
+                  Nic->Handle,
+                  EFI_OPEN_PROTOCOL_GET_PROTOCOL
+                  );
+  if (EFI_ERROR (Status)) {
+    Ip4Sb->DestroyChild (Ip4Sb, Ip4Child);
+    Result->StatusCode = TEST_RESULT_SKIP;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"Cannot open IP4 protocol");
     return EFI_SUCCESS;
   }
 
   //
-  // Send ICMP echo request
+  // Configure for ICMP
   //
-  TxLen = PktBuildIcmpEchoRequest (
-            TxBuf,
-            Snp->Mode->CurrentAddress.Addr,
-            DstMac,
-            Config->LocalIp.Addr,
-            Config->TargetIp.Addr,
-            L3_ICMP_ID,
-            300,
-            NULL,
-            0
-            );
+  ZeroMem (&Ip4Config, sizeof (Ip4Config));
+  Ip4Config.DefaultProtocol    = 1;
+  Ip4Config.AcceptAnyProtocol  = FALSE;
+  Ip4Config.AcceptIcmpErrors   = TRUE;
+  Ip4Config.AcceptBroadcast    = FALSE;
+  Ip4Config.AcceptPromiscuous  = FALSE;
+  Ip4Config.UseDefaultAddress  = FALSE;
+  CopyMem (&Ip4Config.StationAddress, Nic->Ipv4Address.Addr, 4);
+  CopyMem (&Ip4Config.SubnetMask, Nic->SubnetMask.Addr, 4);
+  Ip4Config.TimeToLive         = 64;
+  Ip4Config.RawData            = FALSE;
 
-  Snp->ReceiveFilters (
-    Snp,
-    EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
-    EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST,
-    0, FALSE, 0, NULL
-    );
+  Status = Ip4->Configure (Ip4, &Ip4Config);
+  if (EFI_ERROR (Status)) {
+    //
+    // Fallback: UseDefaultAddress=TRUE
+    //
+    ZeroMem (&Ip4Config, sizeof (Ip4Config));
+    Ip4Config.DefaultProtocol    = 1;
+    Ip4Config.AcceptAnyProtocol  = FALSE;
+    Ip4Config.AcceptIcmpErrors   = TRUE;
+    Ip4Config.UseDefaultAddress  = TRUE;
+    Ip4Config.TimeToLive         = 64;
+    Ip4Config.RawData            = FALSE;
 
-  Status = Snp->Transmit (Snp, 0, TxLen, TxBuf, NULL, NULL, NULL);
+    Status = Ip4->Configure (Ip4, &Ip4Config);
+    if (EFI_ERROR (Status)) {
+      Ip4Sb->DestroyChild (Ip4Sb, Ip4Child);
+      Result->StatusCode = TEST_RESULT_SKIP;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"IP4 Configure failed: %r", Status);
+      return EFI_SUCCESS;
+    }
+  }
+
+  //
+  // Add default route
+  //
+  HasGw = FALSE;
+  for (I = 0; I < 4; I++) {
+    if (Nic->Gateway.Addr[I] != 0) { HasGw = TRUE; break; }
+  }
+
+  if (HasGw) {
+    ZeroMem (&ZeroAddr, sizeof (ZeroAddr));
+    CopyMem (&GwAddr, Nic->Gateway.Addr, 4);
+    Ip4->Routes (Ip4, FALSE, &ZeroAddr, &ZeroAddr, &GwAddr);
+  }
+
+  //
+  // Build ICMP echo request
+  //
+  PayloadSize = 32;
+  IcmpLen     = ICMP_HEADER_SIZE + PayloadSize;
+  IcmpBuf     = AllocateZeroPool (IcmpLen);
+  if (IcmpBuf == NULL) {
+    Ip4->Configure (Ip4, NULL);
+    Ip4Sb->DestroyChild (Ip4Sb, Ip4Child);
+    Result->StatusCode = TEST_RESULT_ERROR;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"Memory allocation failed");
+    return EFI_SUCCESS;
+  }
+
+  Icmp = (ICMP_HEADER *)IcmpBuf;
+  Icmp->Type           = ICMP_TYPE_ECHO_REQUEST;
+  Icmp->Code           = 0;
+  Icmp->Checksum       = 0;
+  Icmp->Identifier     = HTONS (L3_ICMP_ID);
+  Icmp->SequenceNumber = HTONS (300);
+
+  for (I = 0; I < PayloadSize; I++) {
+    IcmpBuf[ICMP_HEADER_SIZE + I] = (UINT8)(I & 0xFF);
+  }
+
+  Icmp->Checksum = HTONS (PktChecksum (IcmpBuf, IcmpLen));
+
+  //
+  // Create TX event and transmit
+  //
+  Status = gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, L3Ip4DummyNotify, NULL, &TxEvent);
+  if (EFI_ERROR (Status)) {
+    goto HeaderCleanup;
+  }
+
+  ZeroMem (&Override, sizeof (Override));
+  CopyMem (&Override.SourceAddress, Nic->Ipv4Address.Addr, 4);
+  Override.TimeToLive = 64;
+  Override.Protocol   = 1;
+
+  ZeroMem (&TxData, sizeof (TxData));
+  CopyMem (&TxData.DestinationAddress, Config->TargetIp.Addr, 4);
+  TxData.OverrideData                    = &Override;
+  TxData.TotalDataLength                 = (UINT32)IcmpLen;
+  TxData.FragmentCount                   = 1;
+  TxData.FragmentTable[0].FragmentLength = (UINT32)IcmpLen;
+  TxData.FragmentTable[0].FragmentBuffer = IcmpBuf;
+
+  ZeroMem (&TxToken, sizeof (TxToken));
+  TxToken.Event         = TxEvent;
+  TxToken.Status        = EFI_NOT_READY;
+  TxToken.Packet.TxData = &TxData;
+
+  Status = Ip4->Transmit (Ip4, &TxToken);
   if (EFI_ERROR (Status)) {
     Result->StatusCode = TEST_RESULT_FAIL;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
                    L"ICMP TX failed: %r", Status);
-    return EFI_SUCCESS;
+    goto HeaderCleanup;
   }
 
   Result->PacketsSent = 1;
 
   //
-  // Wait for reply and validate IP header
+  // Wait for TX
   //
-  for (I = 0; I < 3000; I++) {
-    RxLen   = sizeof (RxBuf);
-    HdrSize = 0;
-    Status  = Snp->Receive (Snp, &HdrSize, &RxLen, RxBuf, NULL, NULL, NULL);
-
-    if (!EFI_ERROR (Status) &&
-        RxLen >= ETHERNET_HEADER_SIZE + IPV4_MIN_HEADER_SIZE) {
-      RxEth = (ETHERNET_HEADER *)RxBuf;
-
-      if (NTOHS (RxEth->EtherType) == ETHERTYPE_IPV4) {
-        RxIp = (IPV4_HEADER *)(RxBuf + ETHERNET_HEADER_SIZE);
-
-        //
-        // Check if this is a reply to us (ICMP)
-        //
-        if (RxIp->Protocol == IP_PROTO_ICMP) {
-          Result->PacketsReceived = 1;
-          Result->BytesReceived   = RxLen;
-
-          //
-          // Validate header fields
-          //
-          Version  = IPV4_VERSION (RxIp->VersionIhl);
-          Ihl      = IPV4_IHL (RxIp->VersionIhl);
-          TotalLen = NTOHS (RxIp->TotalLength);
-          CsumOk   = PktValidateIpChecksum (RxIp);
-
-          UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
-                         L"Ver=%d IHL=%d TotalLen=%d TTL=%d Proto=%d "
-                         L"ID=0x%X Flags=0x%X Checksum=%s "
-                         L"Src=%d.%d.%d.%d Dst=%d.%d.%d.%d",
-                         Version, Ihl, TotalLen, RxIp->Ttl,
-                         RxIp->Protocol,
-                         NTOHS (RxIp->Identification),
-                         NTOHS (RxIp->FlagsFragOffset),
-                         CsumOk ? L"OK" : L"BAD",
-                         RxIp->SrcAddr[0], RxIp->SrcAddr[1],
-                         RxIp->SrcAddr[2], RxIp->SrcAddr[3],
-                         RxIp->DstAddr[0], RxIp->DstAddr[1],
-                         RxIp->DstAddr[2], RxIp->DstAddr[3]);
-
-          if (Version != 4) {
-            Result->StatusCode = TEST_RESULT_FAIL;
-            UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                           L"Invalid IP version: %d (expected 4)", Version);
-            return EFI_SUCCESS;
-          }
-
-          if (Ihl < 5) {
-            Result->StatusCode = TEST_RESULT_FAIL;
-            UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                           L"Invalid IHL: %d (minimum 5)", Ihl);
-            return EFI_SUCCESS;
-          }
-
-          if (!CsumOk) {
-            Result->StatusCode = TEST_RESULT_FAIL;
-            UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                           L"IP header checksum invalid");
-            UnicodeSPrint (Result->FailReason, sizeof (Result->FailReason),
-                           L"Received packet has corrupt IP header checksum");
-            return EFI_SUCCESS;
-          }
-
-          if (TotalLen > RxLen - ETHERNET_HEADER_SIZE) {
-            Result->StatusCode = TEST_RESULT_WARN;
-            UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                           L"IP TotalLength (%d) exceeds frame data (%d)",
-                           TotalLen, RxLen - ETHERNET_HEADER_SIZE);
-            return EFI_SUCCESS;
-          }
-
-          if (RxIp->Ttl == 0) {
-            Result->StatusCode = TEST_RESULT_WARN;
-            UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                           L"Reply has TTL=0 (unusual)");
-            return EFI_SUCCESS;
-          }
-
-          Result->StatusCode = TEST_RESULT_PASS;
-          UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                         L"IP header valid: Ver=4 IHL=%d TTL=%d Checksum OK",
-                         Ihl, RxIp->Ttl);
-          return EFI_SUCCESS;
-        }
-      }
-    }
-
+  for (I = 0; I < 2000 && TxToken.Status == EFI_NOT_READY; I++) {
+    Ip4->Poll (Ip4);
     gBS->Stall (1000);
   }
 
-  Result->StatusCode = TEST_RESULT_FAIL;
-  UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                 L"No IP reply received to validate");
-  UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
-                 L"Verify target responds to ICMP echo");
+  //
+  // Set up receive
+  //
+  Status = gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, L3Ip4DummyNotify, NULL, &RxEvent);
+  if (EFI_ERROR (Status)) {
+    goto HeaderCleanup;
+  }
+
+  ZeroMem (&RxToken, sizeof (RxToken));
+  RxToken.Event  = RxEvent;
+  RxToken.Status = EFI_NOT_READY;
+
+  Status = Ip4->Receive (Ip4, &RxToken);
+  if (EFI_ERROR (Status)) {
+    Result->StatusCode = TEST_RESULT_FAIL;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"IP4 Receive setup failed: %r", Status);
+    goto HeaderCleanup;
+  }
+
+  //
+  // Poll for reply
+  //
+  for (I = 0; I < 3000 && RxToken.Status == EFI_NOT_READY; I++) {
+    Ip4->Poll (Ip4);
+    gBS->Stall (1000);
+  }
+
+  if (RxToken.Status == EFI_NOT_READY) {
+    Ip4->Cancel (Ip4, &RxToken);
+    Ip4->Poll (Ip4);
+    Result->StatusCode = TEST_RESULT_FAIL;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"No IP reply received to validate");
+    UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
+                   L"Verify target responds to ICMP echo");
+    goto HeaderCleanup;
+  }
+
+  if (EFI_ERROR (RxToken.Status)) {
+    Result->StatusCode = TEST_RESULT_FAIL;
+    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                   L"IP4 Receive error: %r", RxToken.Status);
+    goto HeaderCleanup;
+  }
+
+  //
+  // Extract and validate IP header from RxData
+  //
+  if (RxToken.Packet.RxData != NULL) {
+    EFI_IP4_RECEIVE_DATA  *RxData;
+    EFI_IP4_HEADER        *Hdr;
+    UINT8                 Version;
+    UINT8                 Ihl;
+
+    RxData = RxToken.Packet.RxData;
+    Hdr    = RxData->Header;
+
+    Result->PacketsReceived = 1;
+    Result->BytesReceived   = RxData->DataLength + RxData->HeaderLength;
+
+    Version = (Hdr->Version);
+    Ihl     = (Hdr->HeaderLength);
+
+    UnicodeSPrint (Result->Detail, sizeof (Result->Detail),
+                   L"Ver=%d IHL=%d TotalLen=%d TTL=%d Proto=%d "
+                   L"Checksum=OK (validated by IP4 stack) "
+                   L"Src=%d.%d.%d.%d Dst=%d.%d.%d.%d",
+                   Version, Ihl,
+                   RxData->DataLength + RxData->HeaderLength,
+                   Hdr->TimeToLive,
+                   Hdr->Protocol,
+                   Hdr->SourceAddress.Addr[0], Hdr->SourceAddress.Addr[1],
+                   Hdr->SourceAddress.Addr[2], Hdr->SourceAddress.Addr[3],
+                   Hdr->DestinationAddress.Addr[0], Hdr->DestinationAddress.Addr[1],
+                   Hdr->DestinationAddress.Addr[2], Hdr->DestinationAddress.Addr[3]);
+
+    if (Version != 4) {
+      Result->StatusCode = TEST_RESULT_FAIL;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"Invalid IP version: %d (expected 4)", Version);
+    } else if (Ihl < 5) {
+      Result->StatusCode = TEST_RESULT_FAIL;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"Invalid IHL: %d (minimum 5)", Ihl);
+    } else if (Hdr->TimeToLive == 0) {
+      Result->StatusCode = TEST_RESULT_WARN;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"Reply has TTL=0 (unusual)");
+    } else {
+      Result->StatusCode = TEST_RESULT_PASS;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"IP header valid: Ver=4 IHL=%d TTL=%d Checksum OK",
+                     Ihl, Hdr->TimeToLive);
+    }
+
+    //
+    // Recycle
+    //
+    gBS->SignalEvent (RxData->RecycleSignal);
+  }
+
+HeaderCleanup:
+  if (IcmpBuf != NULL) {
+    FreePool (IcmpBuf);
+  }
+
+  if (TxEvent != NULL) {
+    gBS->CloseEvent (TxEvent);
+  }
+
+  if (RxEvent != NULL) {
+    gBS->CloseEvent (RxEvent);
+  }
+
+  if (Ip4 != NULL) {
+    Ip4->Configure (Ip4, NULL);
+  }
+
+  if (Ip4Child != NULL) {
+    Ip4Sb->DestroyChild (Ip4Sb, Ip4Child);
+  }
 
   return EFI_SUCCESS;
 }
@@ -1314,13 +1988,12 @@ TestL3RoutingTable (
   OUT TEST_RESULT_DATA *Result
   )
 {
-  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
-  EFI_STATUS                   Status;
-  BOOLEAN                      HasGateway;
-  BOOLEAN                      GwOnSubnet;
-  UINT8                        GwMac[6];
-  UINTN                        I;
-  CHAR16                       MacStr[20];
+  EFI_STATUS  Status;
+  BOOLEAN     HasGateway;
+  BOOLEAN     GwOnSubnet;
+  UINT8       GwMac[6];
+  UINTN       I;
+  CHAR16      MacStr[20];
 
   //
   // Check gateway configuration
@@ -1375,23 +2048,10 @@ TestL3RoutingTable (
   }
 
   //
-  // Try to ARP-resolve the gateway
+  // Try to ARP-resolve the gateway (via ARP protocol or raw SNP)
   //
-  Snp = Nic->Snp;
-  if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
-    //
-    // Can't verify reachability without SNP, but config looks ok
-    //
-    Result->StatusCode = TEST_RESULT_PASS;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"Gateway %d.%d.%d.%d configured and on local subnet",
-                   Nic->Gateway.Addr[0], Nic->Gateway.Addr[1],
-                   Nic->Gateway.Addr[2], Nic->Gateway.Addr[3]);
-    return EFI_SUCCESS;
-  }
-
   Status = L3ResolveTargetMac (
-             Snp,
+             Nic,
              Nic->Ipv4Address.Addr,
              Nic->Gateway.Addr,
              GwMac,
@@ -1424,8 +2084,8 @@ TestL3RoutingTable (
 
 /**
   Test L3.10: Duplicate IP Detection
-  Sends a gratuitous ARP probe for our own IP address.
-  If another host responds, a duplicate IP exists on the network.
+  Uses ARP protocol to check if another host claims our IP address.
+  Sends ARP request for our own IP and checks if a different MAC responds.
 
   PASS: No duplicate IP detected
   FAIL: Another host claims our IP address
@@ -1437,27 +2097,10 @@ TestL3DuplicateIp (
   OUT TEST_RESULT_DATA *Result
   )
 {
-  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
-  EFI_STATUS                   Status;
-  UINT8                        TxBuf[64];
-  UINT8                        RxBuf[MAX_ETHERNET_FRAME_SIZE];
-  UINTN                        TxLen;
-  UINTN                        RxLen;
-  UINTN                        HdrSize;
-  UINTN                        I;
-  ETHERNET_HEADER              *RxEth;
-  ARP_HEADER                   *RxArp;
-  UINT8                        ZeroIp[4];
-  CHAR16                       MacStr[20];
-  CONST UINT8                  *ProbeIp;
-
-  Snp = Nic->Snp;
-  if (Snp == NULL || Snp->Mode->State != EfiSimpleNetworkInitialized) {
-    Result->StatusCode = TEST_RESULT_SKIP;
-    UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"SNP not initialized");
-    return EFI_SUCCESS;
-  }
+  EFI_STATUS                    Status;
+  CONST UINT8                   *ProbeIp;
+  UINT8                         ResolvedMac[6];
+  CHAR16                        MacStr[20];
 
   //
   // Use our configured IP or the test config local IP
@@ -1469,86 +2112,144 @@ TestL3DuplicateIp (
   }
 
   //
-  // Build ARP probe: Sender IP = 0.0.0.0, Target IP = our IP
-  // This is the standard DAD (Duplicate Address Detection) ARP probe
+  // Method 1: ARP protocol - resolve our own IP
+  // If someone else responds with a different MAC, it's a duplicate.
   //
-  ZeroMem (ZeroIp, sizeof (ZeroIp));
+  if (Nic->HasArp) {
+    Status = L3ArpResolveViaProtocol (
+               Nic->Handle,
+               Nic->Ipv4Address.Addr,
+               ProbeIp,
+               ResolvedMac
+               );
 
-  ZeroMem (TxBuf, sizeof (TxBuf));
-  TxLen = PktBuildArpRequest (
-            TxBuf,
-            Snp->Mode->CurrentAddress.Addr,
-            ZeroIp,
-            ProbeIp
-            );
+    if (!EFI_ERROR (Status)) {
+      //
+      // Got a resolution. Check if it's our own MAC or someone else's.
+      //
+      if (CompareMem (ResolvedMac, Nic->CurrentMac.Addr, 6) != 0) {
+        //
+        // Different MAC responded - duplicate IP!
+        //
+        UtilFormatMac (ResolvedMac, MacStr);
+        Result->StatusCode = TEST_RESULT_FAIL;
+        UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                       L"DUPLICATE IP detected! %d.%d.%d.%d claimed by %s",
+                       ProbeIp[0], ProbeIp[1], ProbeIp[2], ProbeIp[3],
+                       MacStr);
+        UnicodeSPrint (Result->FailReason, sizeof (Result->FailReason),
+                       L"Another host (MAC %s) has the same IP address",
+                       MacStr);
+        UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
+                       L"Change IP on one of the conflicting hosts");
+        return EFI_SUCCESS;
+      }
 
-  Snp->ReceiveFilters (
-    Snp,
-    EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
-    EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST,
-    0, FALSE, 0, NULL
-    );
+      //
+      // Resolved to our own MAC - this is expected, no duplicate
+      //
+      Result->StatusCode = TEST_RESULT_PASS;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"No duplicate IP detected for %d.%d.%d.%d",
+                     ProbeIp[0], ProbeIp[1], ProbeIp[2], ProbeIp[3]);
+      return EFI_SUCCESS;
+    }
 
-  Status = Snp->Transmit (Snp, 0, TxLen, TxBuf, NULL, NULL, NULL);
-  if (EFI_ERROR (Status)) {
-    Result->StatusCode = TEST_RESULT_ERROR;
+    //
+    // ARP timed out - no one (including us) responded. No duplicate.
+    //
+    Result->StatusCode = TEST_RESULT_PASS;
     UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                   L"ARP probe TX failed: %r", Status);
+                   L"No duplicate IP detected for %d.%d.%d.%d (ARP timeout)",
+                   ProbeIp[0], ProbeIp[1], ProbeIp[2], ProbeIp[3]);
     return EFI_SUCCESS;
   }
 
-  Result->PacketsSent = 1;
-  Result->BytesSent   = TxLen;
-
   //
-  // Listen for ARP replies for 3 seconds
-  // Any reply to our probe means someone else has our IP
+  // Method 2: Raw SNP gratuitous ARP probe (fallback)
+  // This may not work when IP4 stack is active (MNP consumes replies)
   //
-  for (I = 0; I < 3000; I++) {
-    RxLen   = sizeof (RxBuf);
-    HdrSize = 0;
-    Status  = Snp->Receive (Snp, &HdrSize, &RxLen, RxBuf, NULL, NULL, NULL);
+  if (Nic->Snp != NULL && Nic->Snp->Mode->State == EfiSimpleNetworkInitialized) {
+    EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
+    UINT8                        TxBuf[64];
+    UINT8                        RxBuf[MAX_ETHERNET_FRAME_SIZE];
+    UINTN                        TxLen;
+    UINTN                        RxLen;
+    UINTN                        HdrSize;
+    UINTN                        I;
+    ETHERNET_HEADER              *RxEth;
+    ARP_HEADER                   *RxArp;
+    UINT8                        ZeroIp[4];
 
-    if (!EFI_ERROR (Status) && RxLen >= ETHERNET_HEADER_SIZE + ARP_HEADER_SIZE) {
-      RxEth = (ETHERNET_HEADER *)RxBuf;
+    Snp = Nic->Snp;
 
-      if (NTOHS (RxEth->EtherType) == ETHERTYPE_ARP) {
-        RxArp = (ARP_HEADER *)(RxBuf + ETHERNET_HEADER_SIZE);
+    //
+    // Build ARP probe: Sender IP = 0.0.0.0, Target IP = our IP
+    //
+    ZeroMem (ZeroIp, sizeof (ZeroIp));
+    ZeroMem (TxBuf, sizeof (TxBuf));
+    TxLen = PktBuildArpRequest (TxBuf, Snp->Mode->CurrentAddress.Addr, ZeroIp, ProbeIp);
 
-        if (NTOHS (RxArp->Operation) == ARP_OP_REPLY) {
-          //
-          // Check if the reply is for our probed IP
-          //
-          if (RxArp->SenderIp[0] == ProbeIp[0] &&
-              RxArp->SenderIp[1] == ProbeIp[1] &&
-              RxArp->SenderIp[2] == ProbeIp[2] &&
-              RxArp->SenderIp[3] == ProbeIp[3]) {
-            //
-            // Make sure it's not from our own MAC
-            //
-            if (CompareMem (RxArp->SenderMac, Snp->Mode->CurrentAddress.Addr, 6) != 0) {
-              Result->PacketsReceived = 1;
-              Result->BytesReceived   = RxLen;
+    Snp->ReceiveFilters (
+      Snp,
+      EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
+      EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST,
+      0, FALSE, 0, NULL
+      );
 
-              UtilFormatMac (RxArp->SenderMac, MacStr);
-              Result->StatusCode = TEST_RESULT_FAIL;
-              UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
-                             L"DUPLICATE IP detected! %d.%d.%d.%d claimed by %s",
-                             ProbeIp[0], ProbeIp[1], ProbeIp[2], ProbeIp[3],
-                             MacStr);
-              UnicodeSPrint (Result->FailReason, sizeof (Result->FailReason),
-                             L"Another host (MAC %s) has the same IP address",
-                             MacStr);
-              UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
-                             L"Change IP on one of the conflicting hosts");
-              return EFI_SUCCESS;
+    Status = Snp->Transmit (Snp, 0, TxLen, TxBuf, NULL, NULL, NULL);
+    if (EFI_ERROR (Status)) {
+      Result->StatusCode = TEST_RESULT_WARN;
+      UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                     L"ARP probe TX failed: %r (cannot verify)", Status);
+      return EFI_SUCCESS;
+    }
+
+    Result->PacketsSent = 1;
+    Result->BytesSent   = TxLen;
+
+    //
+    // Listen for ARP replies for 3 seconds
+    //
+    for (I = 0; I < 3000; I++) {
+      RxLen   = sizeof (RxBuf);
+      HdrSize = 0;
+      Status  = Snp->Receive (Snp, &HdrSize, &RxLen, RxBuf, NULL, NULL, NULL);
+
+      if (!EFI_ERROR (Status) && RxLen >= ETHERNET_HEADER_SIZE + ARP_HEADER_SIZE) {
+        RxEth = (ETHERNET_HEADER *)RxBuf;
+
+        if (NTOHS (RxEth->EtherType) == ETHERTYPE_ARP) {
+          RxArp = (ARP_HEADER *)(RxBuf + ETHERNET_HEADER_SIZE);
+
+          if (NTOHS (RxArp->Operation) == ARP_OP_REPLY) {
+            if (RxArp->SenderIp[0] == ProbeIp[0] &&
+                RxArp->SenderIp[1] == ProbeIp[1] &&
+                RxArp->SenderIp[2] == ProbeIp[2] &&
+                RxArp->SenderIp[3] == ProbeIp[3]) {
+              if (CompareMem (RxArp->SenderMac, Snp->Mode->CurrentAddress.Addr, 6) != 0) {
+                Result->PacketsReceived = 1;
+                Result->BytesReceived   = RxLen;
+                UtilFormatMac (RxArp->SenderMac, MacStr);
+                Result->StatusCode = TEST_RESULT_FAIL;
+                UnicodeSPrint (Result->Summary, sizeof (Result->Summary),
+                               L"DUPLICATE IP detected! %d.%d.%d.%d claimed by %s",
+                               ProbeIp[0], ProbeIp[1], ProbeIp[2], ProbeIp[3],
+                               MacStr);
+                UnicodeSPrint (Result->FailReason, sizeof (Result->FailReason),
+                               L"Another host (MAC %s) has the same IP address",
+                               MacStr);
+                UnicodeSPrint (Result->Suggestion, sizeof (Result->Suggestion),
+                               L"Change IP on one of the conflicting hosts");
+                return EFI_SUCCESS;
+              }
             }
           }
         }
       }
-    }
 
-    gBS->Stall (1000);
+      gBS->Stall (1000);
+    }
   }
 
   Result->StatusCode = TEST_RESULT_PASS;

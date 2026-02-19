@@ -138,5 +138,8 @@ EFI_STATUS EnumerateDrivers      (OUT DRIVER_INFO *Drivers, IN OUT UINTN *Count)
 EFI_STATUS CollectAcpiInfo       (OUT ACPI_BASIC_INFO *Info);
 
 EFI_STATUS DiscoverNics          (OUT NIC_INFO *Nics, IN OUT UINTN *Count);
+EFI_STATUS DiscoverPciNics       (OUT PCI_NIC_INFO *PciNics, IN OUT UINTN *PciCount,
+                                  IN NIC_INFO *SnpNics, IN UINTN SnpCount);
+BOOLEAN    NicRefreshMedia       (IN OUT NIC_INFO *Nic);
 
 #endif // SYSTEM_INFO_H_

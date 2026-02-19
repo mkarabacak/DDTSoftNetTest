@@ -113,7 +113,51 @@ DiscoverNics (
     Nics[*Count].Snp    = Snp;
 
     //
-    // Read SNP Mode data
+    // Ensure SNP is initialized before reading Mode data.
+    // MediaPresent is only valid after Initialize() per UEFI spec.
+    // SNP states: Stopped -> Started -> Initialized
+    //
+    if (Snp->Mode != NULL) {
+      if (Snp->Mode->State == EfiSimpleNetworkStopped) {
+        Status = Snp->Start (Snp);
+        if (!EFI_ERROR (Status)) {
+          Snp->Initialize (Snp, 0, 0);
+        }
+      } else if (Snp->Mode->State == EfiSimpleNetworkStarted) {
+        Snp->Initialize (Snp, 0, 0);
+      }
+    }
+
+    //
+    // Force MediaPresent update via GetStatus().
+    // UEFI spec: Mode->MediaPresent is NOT updated automatically.
+    // GetStatus() is the ONLY way to refresh media detection state.
+    // Also allow time for link negotiation after Initialize.
+    //
+    if (Snp->Mode != NULL && Snp->Mode->State == EfiSimpleNetworkInitialized) {
+      UINT32  IntStatus;
+      VOID    *RecycleBuf;
+      UINTN   MediaRetry;
+
+      //
+      // Quick media check: 3 tries x 100ms = 300ms max.
+      // Keeps startup fast. Auto-refresh will catch later link-up.
+      //
+      for (MediaRetry = 0; MediaRetry < 3; MediaRetry++) {
+        IntStatus  = 0;
+        RecycleBuf = NULL;
+        Snp->GetStatus (Snp, &IntStatus, &RecycleBuf);
+
+        if (Snp->Mode->MediaPresent) {
+          break;  // Link is up
+        }
+
+        gBS->Stall (100000);  // 100ms
+      }
+    }
+
+    //
+    // Read SNP Mode data (now valid after Initialize + GetStatus)
     //
     if (Snp->Mode != NULL) {
       CopyMem (&Nics[*Count].CurrentMac, &Snp->Mode->CurrentAddress, sizeof (EFI_MAC_ADDRESS));
@@ -204,7 +248,338 @@ DiscoverNics (
 
   FreePool (HandleBuffer);
 
+  //
+  // ========== Deduplicate SNP entries with same MAC ==========
+  //
+  // UEFI network stack creates multiple child handles (MNP, IP4, ARP)
+  // on a single physical NIC. Each child also exposes SNP, resulting
+  // in 2-4 entries with identical MAC/PCI for one physical NIC.
+  //
+  // Strategy: for each group of entries sharing the same MAC, keep
+  // the one with the most upper-layer protocols (richest handle).
+  //
+  {
+    UINTN  I, J;
+    UINTN  FinalCount;
+
+    for (I = 0; I < *Count; I++) {
+      if (Nics[I].Handle == NULL) {
+        continue;  // Already marked for removal
+      }
+
+      for (J = I + 1; J < *Count; J++) {
+        if (Nics[J].Handle == NULL) {
+          continue;
+        }
+
+        //
+        // Compare MAC addresses (6 bytes)
+        //
+        if (CompareMem (Nics[I].CurrentMac.Addr, Nics[J].CurrentMac.Addr, 6) == 0) {
+          //
+          // Same MAC — count protocols to decide which to keep
+          //
+          UINTN  ProtoI, ProtoJ;
+
+          ProtoI = (Nics[I].HasMnp ? 1 : 0) + (Nics[I].HasArp ? 1 : 0) +
+                   (Nics[I].HasIp4 ? 1 : 0) + (Nics[I].HasIp6 ? 1 : 0) +
+                   (Nics[I].HasTcp4 ? 1 : 0) + (Nics[I].HasUdp4 ? 1 : 0) +
+                   (Nics[I].HasDhcp4 ? 1 : 0) + (Nics[I].HasDns4 ? 1 : 0) +
+                   (Nics[I].HasHttp ? 1 : 0) + (Nics[I].HasTls ? 1 : 0);
+
+          ProtoJ = (Nics[J].HasMnp ? 1 : 0) + (Nics[J].HasArp ? 1 : 0) +
+                   (Nics[J].HasIp4 ? 1 : 0) + (Nics[J].HasIp6 ? 1 : 0) +
+                   (Nics[J].HasTcp4 ? 1 : 0) + (Nics[J].HasUdp4 ? 1 : 0) +
+                   (Nics[J].HasDhcp4 ? 1 : 0) + (Nics[J].HasDns4 ? 1 : 0) +
+                   (Nics[J].HasHttp ? 1 : 0) + (Nics[J].HasTls ? 1 : 0);
+
+          if (ProtoJ > ProtoI) {
+            //
+            // J is richer — remove I, keep J
+            //
+            Nics[I].Handle = NULL;
+            break;  // I is removed, no need to check more
+          } else {
+            //
+            // I is richer or equal — remove J
+            //
+            Nics[J].Handle = NULL;
+          }
+        }
+      }
+    }
+
+    //
+    // Compact array: remove NULL entries and re-index
+    //
+    FinalCount = 0;
+    for (I = 0; I < *Count; I++) {
+      if (Nics[I].Handle != NULL) {
+        if (FinalCount != I) {
+          CopyMem (&Nics[FinalCount], &Nics[I], sizeof (NIC_INFO));
+        }
+        Nics[FinalCount].Index = FinalCount;
+        FinalCount++;
+      }
+    }
+    *Count = FinalCount;
+  }
+
   return (*Count > 0) ? EFI_SUCCESS : EFI_NOT_FOUND;
+}
+
+/**
+  Discover PCI network controllers (class 0x02).
+  Scans all PCI IO handles, checks for network class, reads vendor/device IDs,
+  detects driver presence via OpenProtocolInformation, and tries to match
+  each PCI NIC to an existing SNP NIC for MAC/media info.
+
+  Adapted from SelfDestroySystem CollectNetworkInfo.
+
+  @param[out]     PciNics   Array to receive PCI NIC information.
+  @param[in,out]  PciCount  On input, max entries. On output, actual count.
+  @param[in]      SnpNics   Array of SNP-discovered NICs for cross-reference.
+  @param[in]      SnpCount  Number of SNP NICs.
+
+  @retval EFI_SUCCESS    PCI NICs discovered.
+  @retval EFI_NOT_FOUND  No PCI network controllers found.
+**/
+EFI_STATUS
+DiscoverPciNics (
+  OUT PCI_NIC_INFO  *PciNics,
+  IN OUT UINTN      *PciCount,
+  IN  NIC_INFO      *SnpNics,
+  IN  UINTN         SnpCount
+  )
+{
+  EFI_STATUS              Status;
+  EFI_HANDLE              *Handles;
+  UINTN                   HandleCount;
+  UINTN                   I;
+  UINTN                   MaxNics;
+  EFI_PCI_IO_PROTOCOL     *PciIo;
+  UINT8                   ClassCode[3];
+  UINT16                  VendorId;
+  UINT16                  DeviceId;
+  UINTN                   Seg, Bus, Dev, Func;
+  CONST CHAR16            *VendorName;
+  CONST CHAR16            *DeviceName;
+
+  if (PciNics == NULL || PciCount == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  MaxNics = *PciCount;
+  *PciCount = 0;
+
+  Status = gBS->LocateHandleBuffer (
+                  ByProtocol,
+                  &gEfiPciIoProtocolGuid,
+                  NULL,
+                  &HandleCount,
+                  &Handles
+                  );
+  if (EFI_ERROR (Status)) {
+    return EFI_NOT_FOUND;
+  }
+
+  for (I = 0; I < HandleCount && *PciCount < MaxNics; I++) {
+    Status = gBS->HandleProtocol (
+                    Handles[I],
+                    &gEfiPciIoProtocolGuid,
+                    (VOID **)&PciIo
+                    );
+    if (EFI_ERROR (Status) || PciIo == NULL) {
+      continue;
+    }
+
+    //
+    // Read class code — only interested in Network Controllers (0x02)
+    //
+    Status = PciIo->Pci.Read (PciIo, EfiPciIoWidthUint8, 0x09, 3, ClassCode);
+    if (EFI_ERROR (Status) || ClassCode[2] != 0x02) {
+      continue;
+    }
+
+    //
+    // Read Vendor/Device ID
+    //
+    Status = PciIo->Pci.Read (PciIo, EfiPciIoWidthUint16, 0x00, 1, &VendorId);
+    if (EFI_ERROR (Status) || VendorId == 0xFFFF) {
+      continue;
+    }
+
+    PciIo->Pci.Read (PciIo, EfiPciIoWidthUint16, 0x02, 1, &DeviceId);
+    PciIo->GetLocation (PciIo, &Seg, &Bus, &Dev, &Func);
+
+    //
+    // Fill PCI NIC info
+    //
+    ZeroMem (&PciNics[*PciCount], sizeof (PCI_NIC_INFO));
+    PciNics[*PciCount].Index    = *PciCount;
+    PciNics[*PciCount].Handle   = Handles[I];
+    PciNics[*PciCount].VendorId = VendorId;
+    PciNics[*PciCount].DeviceId = DeviceId;
+    PciNics[*PciCount].Bus      = (UINT8)Bus;
+    PciNics[*PciCount].Dev      = (UINT8)Dev;
+    PciNics[*PciCount].Func     = (UINT8)Func;
+
+    VendorName = PciLookupVendorName (VendorId);
+    UtilSafeStrCpy (PciNics[*PciCount].VendorName, VendorName, 32);
+
+    DeviceName = PciLookupNicDeviceName (VendorId, DeviceId);
+    if (DeviceName != NULL) {
+      UtilSafeStrCpy (PciNics[*PciCount].DeviceModel, DeviceName, 48);
+    } else {
+      UnicodeSPrint (PciNics[*PciCount].DeviceModel,
+                     sizeof (PciNics[*PciCount].DeviceModel),
+                     L"Device %04X", DeviceId);
+    }
+
+    //
+    // Check if a driver is attached (OpenProtocolInformation method from SelfDestroySystem)
+    //
+    {
+      EFI_OPEN_PROTOCOL_INFORMATION_ENTRY  *OpenInfo;
+      UINTN                                OpenInfoCount;
+      UINTN                                J;
+
+      OpenInfo      = NULL;
+      OpenInfoCount = 0;
+      PciNics[*PciCount].HasDriver = FALSE;
+
+      Status = gBS->OpenProtocolInformation (
+                      Handles[I],
+                      &gEfiPciIoProtocolGuid,
+                      &OpenInfo,
+                      &OpenInfoCount
+                      );
+      if (!EFI_ERROR (Status) && OpenInfo != NULL) {
+        for (J = 0; J < OpenInfoCount; J++) {
+          if (OpenInfo[J].Attributes & EFI_OPEN_PROTOCOL_BY_DRIVER) {
+            PciNics[*PciCount].HasDriver = TRUE;
+            break;
+          }
+        }
+
+        FreePool (OpenInfo);
+      }
+    }
+
+    //
+    // Try to match with an SNP NIC by PCI Bus/Dev/Func
+    //
+    {
+      UINTN  S;
+
+      PciNics[*PciCount].MatchedSnp = FALSE;
+      for (S = 0; S < SnpCount; S++) {
+        if (SnpNics[S].HasPciInfo &&
+            SnpNics[S].PciBus  == (UINT8)Bus &&
+            SnpNics[S].PciDev  == (UINT8)Dev &&
+            SnpNics[S].PciFunc == (UINT8)Func) {
+          PciNics[*PciCount].MatchedSnp    = TRUE;
+          PciNics[*PciCount].SnpIndex      = S;
+          PciNics[*PciCount].HasMac        = TRUE;
+          PciNics[*PciCount].MediaPresent  = SnpNics[S].MediaPresent;
+          CopyMem (PciNics[*PciCount].MacAddress,
+                   SnpNics[S].CurrentMac.Addr, 6);
+          break;
+        }
+      }
+
+      //
+      // If no BDF match, try matching by PCI VendorId:DeviceId
+      // (some platforms have different BDF for SNP child vs PCI parent)
+      //
+      if (!PciNics[*PciCount].MatchedSnp) {
+        for (S = 0; S < SnpCount; S++) {
+          if (SnpNics[S].HasPciInfo &&
+              SnpNics[S].PciVendorId == VendorId &&
+              SnpNics[S].PciDeviceId == DeviceId) {
+            PciNics[*PciCount].MatchedSnp    = TRUE;
+            PciNics[*PciCount].SnpIndex      = S;
+            PciNics[*PciCount].HasMac        = TRUE;
+            PciNics[*PciCount].MediaPresent  = SnpNics[S].MediaPresent;
+            CopyMem (PciNics[*PciCount].MacAddress,
+                     SnpNics[S].CurrentMac.Addr, 6);
+            break;
+          }
+        }
+      }
+
+      //
+      // If still no match, try to find SNP child on this PCI device's path
+      // (SelfDestroySystem approach: compare device path prefix)
+      //
+      if (!PciNics[*PciCount].MatchedSnp && !PciNics[*PciCount].HasMac) {
+        EFI_DEVICE_PATH_PROTOCOL  *PciDevPath;
+
+        Status = gBS->HandleProtocol (
+                        Handles[I],
+                        &gEfiDevicePathProtocolGuid,
+                        (VOID **)&PciDevPath
+                        );
+        if (!EFI_ERROR (Status) && PciDevPath != NULL) {
+          UINTN       PciPathSize;
+          EFI_HANDLE  *SnpHandles;
+          UINTN       SnpHandleCount;
+
+          PciPathSize = GetDevicePathSize (PciDevPath) - sizeof (EFI_DEVICE_PATH_PROTOCOL);
+
+          Status = gBS->LocateHandleBuffer (
+                          ByProtocol,
+                          &gEfiSimpleNetworkProtocolGuid,
+                          NULL,
+                          &SnpHandleCount,
+                          &SnpHandles
+                          );
+          if (!EFI_ERROR (Status)) {
+            UINTN  K;
+
+            for (K = 0; K < SnpHandleCount; K++) {
+              EFI_DEVICE_PATH_PROTOCOL      *SnpPath;
+              EFI_SIMPLE_NETWORK_PROTOCOL   *ChildSnp;
+
+              Status = gBS->HandleProtocol (
+                              SnpHandles[K],
+                              &gEfiDevicePathProtocolGuid,
+                              (VOID **)&SnpPath
+                              );
+              if (EFI_ERROR (Status) || SnpPath == NULL) {
+                continue;
+              }
+
+              if (PciPathSize > 0 &&
+                  CompareMem (PciDevPath, SnpPath, PciPathSize) == 0) {
+                Status = gBS->HandleProtocol (
+                                SnpHandles[K],
+                                &gEfiSimpleNetworkProtocolGuid,
+                                (VOID **)&ChildSnp
+                                );
+                if (!EFI_ERROR (Status) && ChildSnp != NULL &&
+                    ChildSnp->Mode != NULL) {
+                  CopyMem (PciNics[*PciCount].MacAddress,
+                           ChildSnp->Mode->CurrentAddress.Addr, 6);
+                  PciNics[*PciCount].HasMac       = TRUE;
+                  PciNics[*PciCount].MediaPresent  = ChildSnp->Mode->MediaPresent;
+                }
+
+                break;
+              }
+            }
+
+            FreePool (SnpHandles);
+          }
+        }
+      }
+    }
+
+    (*PciCount)++;
+  }
+
+  FreePool (Handles);
+  return (*PciCount > 0) ? EFI_SUCCESS : EFI_NOT_FOUND;
 }
 
 /**
@@ -720,4 +1095,77 @@ GetIpConfig (
       }
     }
   }
+}
+
+/**
+  Refresh media status for a single NIC via GetStatus().
+  Updates MediaPresent in the NIC_INFO structure.
+  Call this periodically for real-time cable plug/unplug detection.
+
+  Uses double-read debouncing: two GetStatus() calls 10ms apart must
+  agree before the displayed state changes. This prevents flickering
+  caused by SNP drivers that return inconsistent MediaPresent values
+  on rapid polling.
+
+  @param[in,out]  Nic  NIC info structure with valid Snp pointer.
+
+  @return Current MediaPresent state (TRUE = cable connected).
+**/
+BOOLEAN
+NicRefreshMedia (
+  IN OUT NIC_INFO  *Nic
+  )
+{
+  UINT32   IntStatus;
+  VOID     *RecycleBuf;
+  BOOLEAN  Reading1;
+  BOOLEAN  Reading2;
+
+  if (Nic == NULL || Nic->Snp == NULL || Nic->Snp->Mode == NULL) {
+    return FALSE;
+  }
+
+  if (Nic->Snp->Mode->State != EfiSimpleNetworkInitialized) {
+    return Nic->MediaPresent;
+  }
+
+  //
+  // Aggressive media detection: try up to 10 times with 100ms gaps.
+  // If ANY read returns TRUE, set MediaPresent=TRUE immediately.
+  // The Intel I219-LM SNP driver can be slow to update MediaPresent
+  // after Initialize+GetStatus; a single 3ms debounce is not enough.
+  //
+  {
+    UINTN  Retry;
+    UINTN  MaxRetries;
+
+    //
+    // If already TRUE, just do a quick 2-read debounce
+    //
+    if (Nic->MediaPresent) {
+      MaxRetries = 2;
+    } else {
+      MaxRetries = 10;
+    }
+
+    for (Retry = 0; Retry < MaxRetries; Retry++) {
+      IntStatus  = 0;
+      RecycleBuf = NULL;
+      Nic->Snp->GetStatus (Nic->Snp, &IntStatus, &RecycleBuf);
+
+      if (Nic->Snp->Mode->MediaPresent) {
+        Nic->MediaPresent = TRUE;
+        return TRUE;
+      }
+
+      gBS->Stall (100000);  // 100ms
+    }
+
+    //
+    // All reads returned FALSE — cable truly disconnected
+    //
+    Nic->MediaPresent = FALSE;
+  }
+
+  return Nic->MediaPresent;
 }

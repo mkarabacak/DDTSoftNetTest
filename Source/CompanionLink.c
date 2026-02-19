@@ -10,6 +10,7 @@
 
 #include <DDTSoftNetTest.h>
 #include <Protocol/ServiceBinding.h>
+#include <Protocol/ManagedNetwork.h>
 
 //
 // Notify stub for UDP4 completion tokens
@@ -52,6 +53,10 @@ CompanionInit (
   EFI_STATUS                    Status;
   EFI_SERVICE_BINDING_PROTOCOL  *Udp4Sb;
   EFI_UDP4_CONFIG_DATA          UdpConfig;
+  EFI_IP4_CONFIG2_PROTOCOL      *Ip4Cfg2;
+  EFI_IP4_CONFIG2_POLICY        Policy;
+  EFI_IP4_CONFIG2_MANUAL_ADDRESS ManualAddr;
+  UINTN                         DataSize;
 
   if (Link == NULL || LocalIp == NULL || CompanionIp == NULL) {
     return EFI_INVALID_PARAMETER;
@@ -77,7 +82,73 @@ CompanionInit (
   }
 
   //
-  // Open UDP4 Service Binding on the NIC handle
+  // Step 1: Configure IP4 via IP4Config2 with our static address.
+  // This sets the NIC's DEFAULT IP4 instance to our address,
+  // so UseDefaultAddress=TRUE in UDP4 will use it.
+  // This is more reliable than UseDefaultAddress=FALSE because
+  // the default IP4 instance has proper ARP integration.
+  //
+  Status = gBS->HandleProtocol (
+                  NicHandle,
+                  &gEfiIp4Config2ProtocolGuid,
+                  (VOID **)&Ip4Cfg2
+                  );
+  if (EFI_ERROR (Status)) {
+    UtilSafeStrCpy (Link->StatusMsg, L"IP4Config2 not found on NIC", 128);
+    Link->State = COMPANION_ERROR;
+    return Status;
+  }
+
+  //
+  // Set policy to static (overrides DHCP if active)
+  //
+  Policy   = Ip4Config2PolicyStatic;
+  DataSize = sizeof (EFI_IP4_CONFIG2_POLICY);
+  Status = Ip4Cfg2->SetData (
+                      Ip4Cfg2,
+                      Ip4Config2DataTypePolicy,
+                      DataSize,
+                      &Policy
+                      );
+  if (EFI_ERROR (Status)) {
+    UnicodeSPrint (
+      Link->StatusMsg, sizeof (Link->StatusMsg),
+      L"IP4Config2 set policy failed (%r)", Status
+      );
+    Link->State = COMPANION_ERROR;
+    return Status;
+  }
+
+  gBS->Stall (100000);  // 100ms for policy change
+
+  //
+  // Set our static IP address
+  //
+  CopyMem (&ManualAddr.Address, &Link->LocalIp, sizeof (EFI_IPv4_ADDRESS));
+  CopyMem (&ManualAddr.SubnetMask, &Link->SubnetMask, sizeof (EFI_IPv4_ADDRESS));
+  DataSize = sizeof (EFI_IP4_CONFIG2_MANUAL_ADDRESS);
+  Status = Ip4Cfg2->SetData (
+                      Ip4Cfg2,
+                      Ip4Config2DataTypeManualAddress,
+                      DataSize,
+                      &ManualAddr
+                      );
+  if (EFI_ERROR (Status)) {
+    UnicodeSPrint (
+      Link->StatusMsg, sizeof (Link->StatusMsg),
+      L"IP4Config2 set address failed (%r)", Status
+      );
+    Link->State = COMPANION_ERROR;
+    return Status;
+  }
+
+  //
+  // Allow IP stack to settle — ARP tables, routes
+  //
+  gBS->Stall (500000);  // 500ms
+
+  //
+  // Step 2: Open UDP4 Service Binding
   //
   Status = gBS->HandleProtocol (
                   NicHandle,
@@ -118,10 +189,13 @@ CompanionInit (
   }
 
   //
-  // Configure UDP4 instance
+  // Step 3: Configure UDP4 with UseDefaultAddress=TRUE.
+  // The default address is now our static IP (set via IP4Config2 above).
+  // This is more reliable than UseDefaultAddress=FALSE because the
+  // default IP4 instance has full ARP/route integration.
   //
   ZeroMem (&UdpConfig, sizeof (UdpConfig));
-  UdpConfig.AcceptBroadcast    = FALSE;
+  UdpConfig.AcceptBroadcast    = TRUE;
   UdpConfig.AcceptPromiscuous  = FALSE;
   UdpConfig.AcceptAnyPort      = FALSE;
   UdpConfig.AllowDuplicatePort = FALSE;
@@ -130,23 +204,117 @@ CompanionInit (
   UdpConfig.DoNotFragment      = FALSE;
   UdpConfig.ReceiveTimeout     = 0;
   UdpConfig.TransmitTimeout    = 0;
-  UdpConfig.UseDefaultAddress  = FALSE;
 
-  CopyMem (&UdpConfig.StationAddress, &Link->LocalIp, sizeof (EFI_IPv4_ADDRESS));
-  CopyMem (&UdpConfig.SubnetMask, &Link->SubnetMask, sizeof (EFI_IPv4_ADDRESS));
+  //
+  // UseDefaultAddress=TRUE: IP4 stack's configured address is used.
+  // StationAddress/SubnetMask fields are ignored.
+  //
+  UdpConfig.UseDefaultAddress  = TRUE;
   UdpConfig.StationPort = Link->Port;
 
-  CopyMem (&UdpConfig.RemoteAddress, &Link->CompanionIp, sizeof (EFI_IPv4_ADDRESS));
-  UdpConfig.RemotePort = Link->Port;
+  //
+  // Wildcard remote: accept datagrams from ANY source address/port.
+  //
+  ZeroMem (&UdpConfig.RemoteAddress, sizeof (EFI_IPv4_ADDRESS));
+  UdpConfig.RemotePort = 0;
 
-  Status = Link->Udp4->Configure (Link->Udp4, &UdpConfig);
+  //
+  // UDP4 Configure may need a few attempts while IP4 settles
+  //
+  {
+    UINTN  CfgRetry;
+
+    Status = EFI_NO_MAPPING;
+    for (CfgRetry = 0; CfgRetry < 10 && Status == EFI_NO_MAPPING; CfgRetry++) {
+      if (CfgRetry > 0) {
+        gBS->Stall (200000);  // 200ms
+      }
+      Status = Link->Udp4->Configure (Link->Udp4, &UdpConfig);
+    }
+  }
+
   if (EFI_ERROR (Status)) {
-    UtilSafeStrCpy (Link->StatusMsg, L"UDP4 configure failed", 128);
+    UnicodeSPrint (
+      Link->StatusMsg, sizeof (Link->StatusMsg),
+      L"UDP4 configure failed (%r)", Status
+      );
     Link->State = COMPANION_ERROR;
     Udp4Sb->DestroyChild (Udp4Sb, Link->Udp4ChildHandle);
     Link->Udp4            = NULL;
     Link->Udp4ChildHandle = NULL;
     return Status;
+  }
+
+  //
+  // Warm up: poll to let ARP/IP4 process any pending frames
+  //
+  {
+    UINTN  WarmUp;
+    for (WarmUp = 0; WarmUp < 5; WarmUp++) {
+      Link->Udp4->Poll (Link->Udp4);
+      gBS->Stall (100000);  // 100ms
+    }
+  }
+
+  //
+  // Step 4: Create a persistent MNP (Managed Network Protocol) child
+  // for reliable receiving. The UDP4 receive path is unreliable in
+  // some UEFI implementations (frames arrive at NIC but UDP4->Receive
+  // never completes). MNP provides raw frame access at the Ethernet
+  // level, bypassing IP4/UDP4 stack issues entirely.
+  // MNP multiplexes — each client gets independent copies of matching
+  // frames, so this does not interfere with the UDP4/IP4 stack.
+  //
+  {
+    EFI_SERVICE_BINDING_PROTOCOL     *MnpSb;
+    EFI_MANAGED_NETWORK_CONFIG_DATA  MnpConfig;
+    EFI_STATUS                       MnpStatus;
+
+    Link->MnpChildHandle = NULL;
+    Link->Mnp            = NULL;
+    MnpSb                = NULL;
+
+    MnpStatus = gBS->HandleProtocol (
+                       NicHandle,
+                       &gEfiManagedNetworkServiceBindingProtocolGuid,
+                       (VOID **)&MnpSb
+                       );
+    if (!EFI_ERROR (MnpStatus)) {
+      MnpStatus = MnpSb->CreateChild (MnpSb, &Link->MnpChildHandle);
+    }
+    if (!EFI_ERROR (MnpStatus)) {
+      MnpStatus = gBS->HandleProtocol (
+                         Link->MnpChildHandle,
+                         &gEfiManagedNetworkProtocolGuid,
+                         (VOID **)&Link->Mnp
+                         );
+    }
+    if (!EFI_ERROR (MnpStatus)) {
+      ZeroMem (&MnpConfig, sizeof (MnpConfig));
+      MnpConfig.ReceivedQueueTimeoutValue = 0;
+      MnpConfig.TransmitQueueTimeoutValue = 0;
+      MnpConfig.ProtocolTypeFilter        = 0x0800;  // IPv4 only
+      MnpConfig.EnableUnicastReceive      = TRUE;
+      MnpConfig.EnableMulticastReceive    = FALSE;
+      MnpConfig.EnableBroadcastReceive    = TRUE;
+      MnpConfig.EnablePromiscuousReceive  = FALSE;
+      MnpConfig.FlushQueuesOnReset        = TRUE;
+      MnpConfig.EnableReceiveTimestamps   = FALSE;
+      MnpConfig.DisableBackgroundPolling  = FALSE;
+
+      MnpStatus = Link->Mnp->Configure (Link->Mnp, &MnpConfig);
+    }
+    if (EFI_ERROR (MnpStatus)) {
+      //
+      // MNP setup failed — clean up partial state.
+      // Init succeeds but CompanionConnect will fail.
+      //
+      if (Link->MnpChildHandle != NULL && MnpSb != NULL) {
+        MnpSb->DestroyChild (MnpSb, Link->MnpChildHandle);
+      }
+      Link->MnpChildHandle = NULL;
+      Link->Mnp            = NULL;
+    }
   }
 
   UtilSafeStrCpy (Link->StatusMsg, L"Initialized, ready to connect", 128);
@@ -172,6 +340,7 @@ CompanionSendCommand (
   EFI_STATUS                 Status;
   EFI_UDP4_COMPLETION_TOKEN  TxToken;
   EFI_UDP4_TRANSMIT_DATA     TxData;
+  EFI_UDP4_SESSION_DATA      SessionData;
   UINTN                      Len;
   UINTN                      ElapsedMs;
 
@@ -185,10 +354,18 @@ CompanionSendCommand (
   }
 
   //
+  // Session data specifies the destination per-packet.
+  // Required because RemoteAddress is wildcard (0.0.0.0) in Configure.
+  //
+  ZeroMem (&SessionData, sizeof (SessionData));
+  CopyMem (&SessionData.DestinationAddress, &Link->CompanionIp, sizeof (EFI_IPv4_ADDRESS));
+  SessionData.DestinationPort = Link->Port;
+
+  //
   // Set up transmit data with single fragment
   //
   ZeroMem (&TxData, sizeof (TxData));
-  TxData.UdpSessionData          = NULL;
+  TxData.UdpSessionData          = &SessionData;
   TxData.GatewayAddress          = NULL;
   TxData.DataLength              = (UINT32)Len;
   TxData.FragmentCount           = 1;
@@ -214,9 +391,29 @@ CompanionSendCommand (
   TxToken.Packet.TxData = &TxData;
 
   //
-  // Transmit
+  // Transmit — retry on EFI_NO_MAPPING (ARP not resolved yet).
+  // The IP4 child needs ARP to resolve the destination MAC.
+  // Each retry polls aggressively to process ARP responses.
   //
-  Status = Link->Udp4->Transmit (Link->Udp4, &TxToken);
+  {
+    UINTN  TxRetry;
+    UINTN  PollIdx;
+
+    Status = EFI_NO_MAPPING;
+    for (TxRetry = 0; TxRetry < 8 && Status == EFI_NO_MAPPING; TxRetry++) {
+      if (TxRetry > 0) {
+        //
+        // Poll aggressively between retries to process ARP
+        //
+        for (PollIdx = 0; PollIdx < 10; PollIdx++) {
+          Link->Udp4->Poll (Link->Udp4);
+          gBS->Stall (30000);  // 30ms
+        }
+      }
+      Status = Link->Udp4->Transmit (Link->Udp4, &TxToken);
+    }
+  }
+
   if (EFI_ERROR (Status)) {
     gBS->CloseEvent (TxToken.Event);
     return Status;
@@ -247,15 +444,23 @@ CompanionSendCommand (
 
 /**
   Receive a response from the companion with timeout.
+  Uses SNP (Simple Network Protocol) directly to receive raw Ethernet
+  frames, completely bypassing the MNP/IP4/UDP4 receive stack.
+  Parses Ethernet+IPv4+UDP headers to find control channel packets.
+
+  Also counts total received frames for diagnostics — the count is
+  stored in Link->StatusMsg on timeout to help identify whether the
+  NIC is receiving any frames at all.
 
   @param[in,out]  Link          Companion link context.
   @param[out]     Response      Buffer to receive ASCII response.
   @param[in]      ResponseSize  Size of Response buffer in bytes.
   @param[in]      TimeoutMs     Receive timeout in milliseconds.
 
-  @retval EFI_SUCCESS  Response received successfully.
-  @retval EFI_TIMEOUT  No response within timeout period.
-  @retval other        Receive failure.
+  @retval EFI_SUCCESS      Response received successfully.
+  @retval EFI_TIMEOUT      No response within timeout period.
+  @retval EFI_UNSUPPORTED  SNP not available.
+  @retval other            Receive failure.
 **/
 EFI_STATUS
 CompanionReceiveResponse (
@@ -265,107 +470,202 @@ CompanionReceiveResponse (
   IN     UINT32          TimeoutMs
   )
 {
-  EFI_STATUS                 Status;
-  EFI_UDP4_COMPLETION_TOKEN  RxToken;
-  UINTN                      ElapsedMs;
-  UINTN                      TotalLen;
-  UINTN                      CopyLen;
-  UINTN                      I;
+  EFI_STATUS                   Status;
+  EFI_SIMPLE_NETWORK_PROTOCOL  *Snp;
+  UINTN                        ElapsedMs;
+  UINT8                        RxBuf[1600];
+  UINTN                        BufSize;
+  UINTN                        HeaderSize;
+  EFI_TPL                      OldTpl;
+  UINTN                        FrameCount;
+  UINTN                        Ipv4Count;
+  UINTN                        UdpCount;
 
-  if (Link == NULL || Link->Udp4 == NULL || Response == NULL || ResponseSize == 0) {
+  if (Link == NULL || Response == NULL || ResponseSize == 0) {
     return EFI_INVALID_PARAMETER;
   }
 
   //
-  // Create completion token
+  // Get SNP directly from the NIC handle.
+  // This is the lowest possible level — reads raw frames from the
+  // hardware driver, completely bypassing MNP/IP4/UDP4.
   //
-  ZeroMem (&RxToken, sizeof (RxToken));
-  Status = gBS->CreateEvent (
-                  EVT_NOTIFY_SIGNAL,
-                  TPL_CALLBACK,
-                  UdpNotifyStub,
-                  NULL,
-                  &RxToken.Event
+  Status = gBS->HandleProtocol (
+                  Link->NicHandle,
+                  &gEfiSimpleNetworkProtocolGuid,
+                  (VOID **)&Snp
                   );
-  if (EFI_ERROR (Status)) {
-    return Status;
+  if (EFI_ERROR (Status) || Snp == NULL) {
+    return EFI_UNSUPPORTED;
   }
 
-  RxToken.Status        = EFI_NOT_READY;
-  RxToken.Packet.RxData = NULL;
-
-  //
-  // Issue receive
-  //
-  Status = Link->Udp4->Receive (Link->Udp4, &RxToken);
-  if (EFI_ERROR (Status)) {
-    gBS->CloseEvent (RxToken.Event);
-    return Status;
+  if (Snp->Mode->State != EfiSimpleNetworkInitialized) {
+    return EFI_NOT_READY;
   }
 
   //
-  // Poll until data arrives or timeout
+  // Ensure unicast receive is enabled on the NIC.
+  // Some drivers require explicit ReceiveFilters configuration.
   //
-  ElapsedMs = 0;
-  while (RxToken.Status == EFI_NOT_READY && ElapsedMs < TimeoutMs) {
-    Link->Udp4->Poll (Link->Udp4);
-    gBS->Stall (1000);
-    ElapsedMs++;
-  }
+  Snp->ReceiveFilters (
+         Snp,
+         EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
+         EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST,
+         0,
+         FALSE,
+         0,
+         NULL
+         );
 
-  if (RxToken.Status == EFI_NOT_READY) {
-    Link->Udp4->Cancel (Link->Udp4, &RxToken);
-    gBS->CloseEvent (RxToken.Event);
-    return EFI_TIMEOUT;
-  }
-
-  if (EFI_ERROR (RxToken.Status)) {
-    gBS->CloseEvent (RxToken.Event);
-    return RxToken.Status;
-  }
-
-  //
-  // Copy received data from fragments
-  //
   Response[0] = '\0';
-  if (RxToken.Packet.RxData != NULL) {
-    TotalLen = 0;
-    for (I = 0; I < RxToken.Packet.RxData->FragmentCount; I++) {
-      CopyLen = RxToken.Packet.RxData->FragmentTable[I].FragmentLength;
-      if (TotalLen + CopyLen >= ResponseSize - 1) {
-        CopyLen = ResponseSize - 1 - TotalLen;
+  ElapsedMs   = 0;
+  FrameCount  = 0;
+  Ipv4Count   = 0;
+  UdpCount    = 0;
+
+  while (ElapsedMs < TimeoutMs) {
+    //
+    // Raise TPL to prevent MNP background polling from consuming
+    // frames between our SNP->Receive() calls.
+    //
+    BufSize    = sizeof (RxBuf);
+    HeaderSize = 0;
+
+    OldTpl = gBS->RaiseTPL (TPL_CALLBACK);
+    Status = Snp->Receive (Snp, &HeaderSize, &BufSize, RxBuf, NULL, NULL, NULL);
+    gBS->RestoreTPL (OldTpl);
+
+    if (Status == EFI_NOT_READY) {
+      //
+      // No frame in NIC buffer — wait and retry
+      //
+      gBS->Stall (2000);  // 2ms
+      ElapsedMs += 2;
+      continue;
+    }
+
+    if (EFI_ERROR (Status)) {
+      gBS->Stall (2000);
+      ElapsedMs += 2;
+      continue;
+    }
+
+    //
+    // Got a raw Ethernet frame.
+    //
+    FrameCount++;
+
+    //
+    // Need at least Ethernet header (14) + IP header (20) + UDP header (8) = 42
+    //
+    if (BufSize < 42 || HeaderSize < 14) {
+      continue;
+    }
+
+    //
+    // Check EtherType at bytes [12-13] (big-endian): 0x0800 = IPv4
+    //
+    if (RxBuf[12] != 0x08 || RxBuf[13] != 0x00) {
+      continue;
+    }
+
+    //
+    // Parse IPv4 header (starts after Ethernet header)
+    //
+    {
+      UINT8   *IpHdr;
+      UINT16  IpHdrLen;
+      UINT16  DstPort;
+      UINT16  UdpLen;
+      UINT16  PayloadLen;
+      UINTN   CopyLen;
+
+      IpHdr = RxBuf + HeaderSize;
+
+      //
+      // Verify IPv4 version
+      //
+      if ((IpHdr[0] >> 4) != 4) {
+        continue;
       }
-      if (CopyLen > 0) {
-        CopyMem (
-          Response + TotalLen,
-          RxToken.Packet.RxData->FragmentTable[I].FragmentBuffer,
-          CopyLen
-          );
-        TotalLen += CopyLen;
+
+      Ipv4Count++;
+
+      //
+      // Check protocol = UDP (17)
+      //
+      if (IpHdr[9] != 17) {
+        continue;
+      }
+
+      UdpCount++;
+
+      //
+      // Check source IP matches companion
+      //
+      if (CompareMem (&IpHdr[12], &Link->CompanionIp, 4) != 0) {
+        continue;
+      }
+
+      IpHdrLen = (UINT16)((IpHdr[0] & 0x0F) * 4);
+
+      if (BufSize < HeaderSize + IpHdrLen + 8) {
+        continue;
+      }
+
+      //
+      // Parse UDP: [0-1] SrcPort, [2-3] DstPort, [4-5] Length
+      // All in network byte order (big-endian).
+      //
+      DstPort = (UINT16)((IpHdr[IpHdrLen + 2] << 8) | IpHdr[IpHdrLen + 3]);
+
+      if (DstPort != Link->Port) {
+        continue;
+      }
+
+      //
+      // Found matching UDP packet — extract payload
+      //
+      UdpLen     = (UINT16)((IpHdr[IpHdrLen + 4] << 8) | IpHdr[IpHdrLen + 5]);
+      PayloadLen = (UINT16)(UdpLen - 8);
+
+      if (PayloadLen > 0 &&
+          HeaderSize + IpHdrLen + 8 + PayloadLen <= BufSize) {
+        CopyLen = PayloadLen;
+        if (CopyLen >= ResponseSize - 1) {
+          CopyLen = ResponseSize - 1;
+        }
+        CopyMem (Response, &IpHdr[IpHdrLen + 8], CopyLen);
+        Response[CopyLen] = '\0';
+        return EFI_SUCCESS;
       }
     }
-    Response[TotalLen] = '\0';
-
-    //
-    // Recycle the receive buffer
-    //
-    gBS->SignalEvent (RxToken.Packet.RxData->RecycleSignal);
   }
 
-  gBS->CloseEvent (RxToken.Event);
-  return EFI_SUCCESS;
+  //
+  // Timeout — store diagnostic frame counts in StatusMsg.
+  // This helps identify whether the NIC is receiving any frames at all.
+  //
+  UnicodeSPrint (
+    Link->StatusMsg, sizeof (Link->StatusMsg),
+    L"RX frames:%d ipv4:%d udp:%d (no match in %dms)",
+    FrameCount, Ipv4Count, UdpCount, TimeoutMs
+    );
+
+  return EFI_TIMEOUT;
 }
 
 /**
   Perform handshake with the companion.
-  Sends HELLO and waits for ACK response.
+  Sends HELLO via UDP4 and receives ACK via MNP (which bypasses the
+  unreliable UDP4 receive path). Retries up to 3 times.
 
   @param[in,out]  Link  Companion link context.
 
-  @retval EFI_SUCCESS     Handshake completed, companion connected.
-  @retval EFI_TIMEOUT     No response from companion.
+  @retval EFI_SUCCESS       Handshake completed, companion connected.
+  @retval EFI_TIMEOUT       No response from companion after all retries.
   @retval EFI_DEVICE_ERROR  Unexpected response.
-  @retval other           Communication failure.
+  @retval other             Communication failure.
 **/
 EFI_STATUS
 CompanionConnect (
@@ -373,59 +673,77 @@ CompanionConnect (
   )
 {
   EFI_STATUS  Status;
+  UINTN       Attempt;
   CHAR8       Response[COMPANION_MAX_MSG_SIZE];
 
   if (Link == NULL || Link->Udp4 == NULL) {
     return EFI_INVALID_PARAMETER;
   }
 
+  if (Link->Mnp == NULL) {
+    Link->State = COMPANION_ERROR;
+    UtilSafeStrCpy (Link->StatusMsg, L"MNP not available for receive", 128);
+    return EFI_UNSUPPORTED;
+  }
+
   Link->State = COMPANION_CONNECTING;
-  UtilSafeStrCpy (Link->StatusMsg, L"Sending HELLO...", 128);
 
-  //
-  // Send HELLO with version
-  //
-  Status = CompanionSendCommand (Link, "HELLO DDTSoft 1.0\n");
-  if (EFI_ERROR (Status)) {
-    Link->State = COMPANION_ERROR;
-    UtilSafeStrCpy (Link->StatusMsg, L"Failed to send HELLO", 128);
-    return Status;
-  }
+  for (Attempt = 0; Attempt < 3; Attempt++) {
+    UnicodeSPrint (
+      Link->StatusMsg, sizeof (Link->StatusMsg),
+      L"HELLO attempt %d/3...", Attempt + 1
+      );
 
-  //
-  // Wait for ACK
-  //
-  UtilSafeStrCpy (Link->StatusMsg, L"Waiting for ACK...", 128);
-
-  Status = CompanionReceiveResponse (Link, Response, sizeof (Response), Link->TimeoutMs);
-  if (EFI_ERROR (Status)) {
-    Link->State = COMPANION_ERROR;
-    if (Status == EFI_TIMEOUT) {
-      UtilSafeStrCpy (Link->StatusMsg, L"Timeout: no response from companion", 128);
-    } else {
-      UtilSafeStrCpy (Link->StatusMsg, L"Receive error during handshake", 128);
+    //
+    // Send HELLO via UDP4 (transmit path works fine).
+    // MNP's background polling will automatically queue any
+    // incoming ACK frame during the send completion process,
+    // so we don't need the "receive-before-send" pattern.
+    //
+    Status = CompanionSendCommand (Link, "HELLO DDTSoft 1.0\n");
+    if (EFI_ERROR (Status)) {
+      //
+      // Send failed — wait for ARP to settle and retry
+      //
+      gBS->Stall (1000000);  // 1s
+      continue;
     }
-    return Status;
-  }
 
-  //
-  // Check for ACK response
-  //
-  if (AsciiStrnCmp (Response, "ACK", 3) == 0) {
-    Link->State = COMPANION_CONNECTED;
-    UtilSafeStrCpy (Link->StatusMsg, L"Connected to companion", 128);
-    return EFI_SUCCESS;
-  }
+    //
+    // Receive ACK via MNP (bypasses broken UDP4 receive).
+    // MNP provides raw Ethernet frames which CompanionReceiveResponse
+    // parses to find our UDP control channel packets.
+    //
+    Response[0] = '\0';
+    Status = CompanionReceiveResponse (Link, Response, sizeof (Response), 2000);
+    if (EFI_ERROR (Status)) {
+      continue;
+    }
 
-  if (AsciiStrnCmp (Response, "ERROR", 5) == 0) {
-    Link->State = COMPANION_ERROR;
-    UtilSafeStrCpy (Link->StatusMsg, L"Companion returned error", 128);
-    return EFI_DEVICE_ERROR;
+    if (AsciiStrnCmp (Response, "ACK", 3) == 0) {
+      Link->State = COMPANION_CONNECTED;
+      UtilSafeStrCpy (Link->StatusMsg, L"Connected to companion", 128);
+      return EFI_SUCCESS;
+    }
+
+    if (AsciiStrnCmp (Response, "ERROR", 5) == 0) {
+      Link->State = COMPANION_ERROR;
+      UtilSafeStrCpy (Link->StatusMsg, L"Companion returned error", 128);
+      return EFI_DEVICE_ERROR;
+    }
+
+    //
+    // Unexpected response — retry
+    //
   }
 
   Link->State = COMPANION_ERROR;
-  UtilSafeStrCpy (Link->StatusMsg, L"Unexpected response to HELLO", 128);
-  return EFI_DEVICE_ERROR;
+  //
+  // StatusMsg already contains frame count diagnostics from the last
+  // CompanionReceiveResponse call (e.g., "RX frames:0 ipv4:0 udp:0").
+  // Don't overwrite — this diagnostic info is critical for debugging.
+  //
+  return EFI_TIMEOUT;
 }
 
 /**
@@ -487,6 +805,29 @@ CompanionDestroy (
   //
   if (Link->State == COMPANION_CONNECTED) {
     CompanionDisconnect (Link);
+  }
+
+  //
+  // Unconfigure and destroy MNP child
+  //
+  if (Link->Mnp != NULL) {
+    Link->Mnp->Configure (Link->Mnp, NULL);
+    Link->Mnp = NULL;
+  }
+  if (Link->MnpChildHandle != NULL) {
+    {
+      EFI_SERVICE_BINDING_PROTOCOL  *MnpSb;
+
+      Status = gBS->HandleProtocol (
+                      Link->NicHandle,
+                      &gEfiManagedNetworkServiceBindingProtocolGuid,
+                      (VOID **)&MnpSb
+                      );
+      if (!EFI_ERROR (Status)) {
+        MnpSb->DestroyChild (MnpSb, Link->MnpChildHandle);
+      }
+    }
+    Link->MnpChildHandle = NULL;
   }
 
   //

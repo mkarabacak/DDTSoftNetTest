@@ -93,6 +93,7 @@ class ControlServer:
             version = " ".join(parts[1:]) if len(parts) > 1 else "unknown"
             logger.info("HELLO from %s (version: %s)", addr, version)
             self._send("ACK DDTSoft Companion 1.0\n", addr)
+            logger.info("ACK sent to %s:%d", addr[0], addr[1])
 
         elif cmd == "PREPARE":
             if not self.connected:

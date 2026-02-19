@@ -8,6 +8,8 @@
 
 [Sources]
   Source/Main.c
+  Source/SystemInfoView.c
+  Source/Logger.c
   Source/UiRenderer.c
   Source/SystemInfo.c
   Source/SmbiosParser.c
@@ -86,6 +88,7 @@
   gEfiTlsProtocolGuid
   gEfiPciIoProtocolGuid
   gEfiLoadedImageProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
   gEfiComponentName2ProtocolGuid
   gEfiDevicePathProtocolGuid
   gEfiAdapterInformationProtocolGuid

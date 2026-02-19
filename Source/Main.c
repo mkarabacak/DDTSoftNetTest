@@ -6,8 +6,10 @@
 #include <DDTSoftNetTest.h>
 #include <UiRenderer.h>
 #include <SystemInfo.h>
+#include <SystemInfoView.h>
 #include <PciIds.h>
 #include <OsiLayers.h>
+#include <PacketDefs.h>
 
 //
 // Main menu items
@@ -22,487 +24,6 @@ STATIC MENU_ITEM  mMainMenu[] = {
 };
 
 #define MAIN_MENU_COUNT  (sizeof (mMainMenu) / sizeof (mMainMenu[0]))
-
-//
-// SystemInfo constants
-//
-#define SYSINFO_TOTAL_PAGES  5
-#define MAX_PCI_DEVICES      128
-#define MAX_DRIVERS          256
-
-//
-// Memory type name lookup
-//
-STATIC CONST CHAR16 *
-GetMemoryTypeName (
-  IN UINT8  MemType
-  )
-{
-  switch (MemType) {
-    case 0x01: return L"Other";
-    case 0x02: return L"Unknown";
-    case 0x03: return L"DRAM";
-    case 0x04: return L"EDRAM";
-    case 0x05: return L"VRAM";
-    case 0x06: return L"SRAM";
-    case 0x07: return L"RAM";
-    case 0x08: return L"ROM";
-    case 0x09: return L"FLASH";
-    case 0x0A: return L"EEPROM";
-    case 0x0B: return L"FEPROM";
-    case 0x0C: return L"EPROM";
-    case 0x0D: return L"CDRAM";
-    case 0x0E: return L"3DRAM";
-    case 0x0F: return L"SDRAM";
-    case 0x10: return L"SGRAM";
-    case 0x11: return L"RDRAM";
-    case 0x12: return L"DDR";
-    case 0x13: return L"DDR2";
-    case 0x14: return L"DDR2 FB";
-    case 0x18: return L"DDR3";
-    case 0x1A: return L"DDR4";
-    case 0x1B: return L"LPDDR";
-    case 0x1C: return L"LPDDR2";
-    case 0x1D: return L"LPDDR3";
-    case 0x1E: return L"LPDDR4";
-    case 0x20: return L"HBM";
-    case 0x21: return L"HBM2";
-    case 0x22: return L"DDR5";
-    case 0x23: return L"LPDDR5";
-    default:   return L"N/A";
-  }
-}
-
-/**
-  Draw Page 1/5: Firmware & System Information.
-**/
-STATIC
-VOID
-DrawSysInfoPage1 (
-  IN FIRMWARE_INFO  *Fw,
-  IN SYSTEM_INFO    *Sys
-  )
-{
-  CHAR16  TmpBuf[128];
-
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 3, 76, 10, L"UEFI Firmware");
-
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  Firmware Vendor  : %s", Fw->FirmwareVendor);
-  UiPrintAt (3, 5, L"  Firmware Rev     : 0x%08X", Fw->FirmwareRevision);
-  UiPrintAt (3, 6, L"  UEFI Spec        : %d.%d", (int)Fw->UefiSpecMajor, (int)Fw->UefiSpecMinor);
-
-  UtilAsciiToUnicode (Fw->BiosVendor, TmpBuf, 128);
-  UiPrintAt (3, 7, L"  BIOS Vendor      : %s", TmpBuf);
-  UtilAsciiToUnicode (Fw->BiosVersion, TmpBuf, 128);
-  UiPrintAt (3, 8, L"  BIOS Version     : %s", TmpBuf);
-  UtilAsciiToUnicode (Fw->BiosReleaseDate, TmpBuf, 128);
-  UiPrintAt (3, 9, L"  BIOS Date        : %s", TmpBuf);
-  UiPrintAt (3, 10, L"  BIOS Release     : %d.%d", (int)Fw->BiosMajorRelease, (int)Fw->BiosMinorRelease);
-  UiPrintAt (3, 11, L"  BIOS ROM Size    : %ld KB", Fw->BiosRomSize / 1024);
-
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 13, 76, 10, L"System Information");
-
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  UtilAsciiToUnicode (Sys->Manufacturer, TmpBuf, 128);
-  UiPrintAt (3, 14, L"  Manufacturer     : %s", TmpBuf);
-  UtilAsciiToUnicode (Sys->ProductName, TmpBuf, 128);
-  UiPrintAt (3, 15, L"  Product          : %s", TmpBuf);
-  UtilAsciiToUnicode (Sys->Version, TmpBuf, 128);
-  UiPrintAt (3, 16, L"  Version          : %s", TmpBuf);
-  UtilAsciiToUnicode (Sys->SerialNumber, TmpBuf, 128);
-  UiPrintAt (3, 17, L"  Serial           : %s", TmpBuf);
-  UiPrintAt (3, 18, L"  UUID             : %g", &Sys->SystemUuid);
-
-  UtilAsciiToUnicode (Sys->BoardManufacturer, TmpBuf, 128);
-  UiPrintAt (3, 19, L"  Board Mfg        : %s", TmpBuf);
-  UtilAsciiToUnicode (Sys->BoardProduct, TmpBuf, 128);
-  UiPrintAt (3, 20, L"  Board Product    : %s", TmpBuf);
-  UtilAsciiToUnicode (Sys->BoardSerial, TmpBuf, 128);
-  UiPrintAt (3, 21, L"  Board Serial     : %s", TmpBuf);
-}
-
-/**
-  Draw Page 2/5: CPU & Memory.
-**/
-STATIC
-VOID
-DrawSysInfoPage2 (
-  IN CPU_INFO     *Cpu,
-  IN MEMORY_INFO  *Mem
-  )
-{
-  CHAR16  TmpBuf[128];
-  UINTN   I;
-  UINTN   Row;
-
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 3, 76, 7, L"Processor");
-
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  UtilAsciiToUnicode (Cpu->ProcessorName, TmpBuf, 128);
-  UiPrintAt (3, 4, L"  Processor   : %s", TmpBuf);
-  UtilAsciiToUnicode (Cpu->SocketDesignation, TmpBuf, 128);
-  UiPrintAt (3, 5, L"  Socket      : %s", TmpBuf);
-  UiPrintAt (3, 6, L"  Max Speed   : %d MHz", (int)Cpu->MaxSpeed);
-  UiPrintAt (3, 7, L"  Cur Speed   : %d MHz", (int)Cpu->CurrentSpeed);
-  UiPrintAt (3, 8, L"  Cores       : %d     Threads: %d", (int)Cpu->CoreCount, (int)Cpu->ThreadCount);
-
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 10, 76, 3, L"Memory");
-
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 11, L"  Total: %d MB   Slots: %d/%d populated",
-             (int)Mem->TotalMemoryMB, (int)Mem->PopulatedSlots, (int)Mem->TotalSlots);
-
-  //
-  // Memory slot table header
-  //
-  Row = 13;
-  UiSetColor (COLOR_WARNING, COLOR_BG);
-  UiPrintAt (2, Row, L" %-14s %7s %6s %6s %-6s %-16s",
-             L"Locator", L"Size", L"Speed", L"Conf", L"Type", L"Manufacturer");
-  UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
-  Row++;
-
-  for (I = 0; I < Mem->TotalSlots && Row < 23; I++) {
-    UtilAsciiToUnicode (Mem->Slots[I].DeviceLocator, TmpBuf, 32);
-
-    if (Mem->Slots[I].SizeMB == 0) {
-      UiSetColor (EFI_DARKGRAY, COLOR_BG);
-      UiPrintAt (2, Row, L" %-14s %7s %6s %6s %-6s %-16s",
-                 TmpBuf, L"Empty", L"-", L"-", L"-", L"-");
-    } else {
-      CHAR16  MfgBuf[32];
-      UiSetColor (COLOR_DEFAULT, COLOR_BG);
-      UtilAsciiToUnicode (Mem->Slots[I].Manufacturer, MfgBuf, 32);
-      UiPrintAt (2, Row, L" %-14s %5d MB %4d  %4d  %-6s %-16s",
-                 TmpBuf,
-                 (int)Mem->Slots[I].SizeMB,
-                 (int)Mem->Slots[I].Speed,
-                 (int)Mem->Slots[I].ConfiguredSpeed,
-                 GetMemoryTypeName (Mem->Slots[I].MemoryType),
-                 MfgBuf);
-    }
-
-    Row++;
-  }
-}
-
-/**
-  Draw Page 3/5: PCI Devices.
-**/
-STATIC
-VOID
-DrawSysInfoPage3 (
-  IN PCI_DEVICE_INFO  *Devices,
-  IN UINTN            DeviceCount,
-  IN UINTN            ScrollOffset
-  )
-{
-  UINTN  I;
-  UINTN  Row;
-  UINTN  MaxRows;
-
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 3, 76, 3, L"PCI Devices");
-
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  Total: %d devices", (int)DeviceCount);
-
-  //
-  // Table header
-  //
-  Row = 6;
-  UiSetColor (COLOR_WARNING, COLOR_BG);
-  UiPrintAt (2, Row, L"   Bus:D.F  VenID DevID Class        Vendor");
-  Row++;
-
-  UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
-  MaxRows = 16;
-
-  for (I = ScrollOffset; I < DeviceCount && (I - ScrollOffset) < MaxRows; I++) {
-    Row = 7 + (I - ScrollOffset);
-
-    if (Devices[I].IsNetworkDevice) {
-      UiSetColor (COLOR_LAYER3, COLOR_BG);
-      UiPrintAt (2, Row, L"%c", L'\x2605');  // star
-    } else {
-      UiSetColor (COLOR_DEFAULT, COLOR_BG);
-      UiPrintAt (2, Row, L" ");
-    }
-
-    UiSetColor (Devices[I].IsNetworkDevice ? COLOR_LAYER3 : COLOR_DEFAULT, COLOR_BG);
-    Print (L" %02X:%02X.%X  %04X  %04X  %-12s %s",
-           Devices[I].Bus, Devices[I].Device, Devices[I].Function,
-           Devices[I].VendorId, Devices[I].DeviceId,
-           Devices[I].ClassName, Devices[I].VendorName);
-  }
-
-  if (DeviceCount > MaxRows) {
-    UiSetColor (EFI_DARKGRAY, COLOR_BG);
-    UiPrintAt (2, Row + 2, L"  [Up/Down] to scroll (%d-%d of %d)",
-               (int)(ScrollOffset + 1), (int)I, (int)DeviceCount);
-  }
-}
-
-/**
-  Draw Page 4/5: UEFI Drivers.
-**/
-STATIC
-VOID
-DrawSysInfoPage4 (
-  IN DRIVER_INFO  *Drivers,
-  IN UINTN        DriverCount,
-  IN UINTN        ScrollOffset,
-  IN BOOLEAN      FilterNetwork
-  )
-{
-  UINTN  I;
-  UINTN  Row;
-  UINTN  MaxRows;
-  UINTN  Displayed;
-
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 3, 76, 3, L"UEFI Loaded Images");
-
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  Total: %d images", (int)DriverCount);
-
-  //
-  // Table header
-  //
-  Row = 6;
-  UiSetColor (COLOR_WARNING, COLOR_BG);
-  UiPrintAt (2, Row, L" %-3s %-38s %8s %s", L"#", L"Name", L"Size", L"Type");
-  Row++;
-
-  MaxRows = 15;
-  Displayed = 0;
-
-  for (I = 0; I < DriverCount && Displayed < MaxRows; I++) {
-    if (Displayed < ScrollOffset) {
-      Displayed++;
-      continue;
-    }
-
-    Row = 7 + (Displayed - ScrollOffset);
-    if (Row >= 22) {
-      break;
-    }
-
-    UiSetColor (Drivers[I].IsDriver ? COLOR_INFO : EFI_LIGHTGRAY, COLOR_BG);
-    UiPrintAt (2, Row, L" %3d %-38.38s %6ld KB %s",
-               (int)(I + 1),
-               Drivers[I].Name,
-               Drivers[I].ImageSize / 1024,
-               Drivers[I].IsDriver ? L"Driver" : L"App");
-
-    Displayed++;
-  }
-
-  UiSetColor (EFI_DARKGRAY, COLOR_BG);
-  UiPrintAt (2, 23, L"  [Up/Down] scroll");
-}
-
-/**
-  Draw Page 5/5: ACPI & Configuration Tables.
-**/
-STATIC
-VOID
-DrawSysInfoPage5 (
-  IN ACPI_BASIC_INFO  *Acpi
-  )
-{
-  CHAR16  OemBuf[8];
-  UINTN   I;
-  UINTN   Row;
-
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 3, 76, 9, L"ACPI Information");
-
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  ACPI Revision    : %d", (int)Acpi->AcpiRevision);
-  UtilAsciiToUnicode (Acpi->OemId, OemBuf, 8);
-  UiPrintAt (3, 5, L"  OEM ID           : %s", OemBuf);
-  UiPrintAt (3, 6, L"  XSDT Tables      : %d", (int)Acpi->XsdtTableCount);
-  UiPrintAt (3, 7, L"  DSDT             : %s", Acpi->HasDsdt ? L"Present" : L"Not found");
-  UiPrintAt (3, 8, L"  FADT             : %s", Acpi->HasFadt ? L"Present" : L"Not found");
-  UiPrintAt (3, 9, L"  MADT (APIC)      : %s", Acpi->HasMadt ? L"Present" : L"Not found");
-  UiPrintAt (3, 10, L"  MCFG (PCIe)      : %s", Acpi->HasMcfg ? L"Present" : L"Not found");
-
-  //
-  // EFI Configuration Tables
-  //
-  UiSetColor (COLOR_HEADER, COLOR_BG);
-  UiDrawBox (1, 12, 76, 3, L"EFI Configuration Tables");
-
-  UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 13, L"  Count: %d tables", (int)gST->NumberOfTableEntries);
-
-  Row = 15;
-  UiSetColor (COLOR_WARNING, COLOR_BG);
-  UiPrintAt (2, Row, L" %-3s %-38s", L"#", L"GUID");
-  Row++;
-
-  UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
-  for (I = 0; I < gST->NumberOfTableEntries && Row < 23; I++) {
-    UiPrintAt (2, Row, L" %3d %g", (int)(I + 1),
-               &gST->ConfigurationTable[I].VendorGuid);
-    Row++;
-  }
-}
-
-/**
-  Show 5-page System Information with left/right navigation.
-**/
-EFI_STATUS
-ShowSystemInfo (
-  VOID
-  )
-{
-  UINTN           CurrentPage;
-  EFI_INPUT_KEY   Key;
-  BOOLEAN         Running;
-  FIRMWARE_INFO   FwInfo;
-  SYSTEM_INFO     SysInfo;
-  CPU_INFO        CpuInfo;
-  MEMORY_INFO     MemInfo;
-  ACPI_BASIC_INFO AcpiInfo;
-  PCI_DEVICE_INFO *PciDevices;
-  UINTN           PciCount;
-  DRIVER_INFO     *DriverList;
-  UINTN           DrvCount;
-  UINTN           PciScroll;
-  UINTN           DrvScroll;
-
-  //
-  // Collect all data
-  //
-  CollectFirmwareInfo (&FwInfo);
-  CollectSystemInfo (&SysInfo);
-  CollectCpuInfo (&CpuInfo);
-  CollectMemoryInfo (&MemInfo);
-  CollectAcpiInfo (&AcpiInfo);
-
-  //
-  // Allocate and enumerate PCI devices
-  //
-  PciDevices = AllocateZeroPool (MAX_PCI_DEVICES * sizeof (PCI_DEVICE_INFO));
-  PciCount = MAX_PCI_DEVICES;
-  if (PciDevices != NULL) {
-    EnumeratePciDevices (PciDevices, &PciCount);
-  } else {
-    PciCount = 0;
-  }
-
-  //
-  // Allocate and enumerate drivers
-  //
-  DriverList = AllocateZeroPool (MAX_DRIVERS * sizeof (DRIVER_INFO));
-  DrvCount = MAX_DRIVERS;
-  if (DriverList != NULL) {
-    EnumerateDrivers (DriverList, &DrvCount);
-  } else {
-    DrvCount = 0;
-  }
-
-  CurrentPage = 1;
-  PciScroll = 0;
-  DrvScroll = 0;
-  Running = TRUE;
-
-  //
-  // Initial full draw
-  //
-  UiClearScreen ();
-  UiDrawHeader ();
-
-  while (Running) {
-    //
-    // Clear only the content area (rows 1 and 3+), not the whole screen.
-    // This avoids the blank-screen flash on every keypress.
-    //
-    UiClearLines (1, 1);
-    UiClearLines (3, UiGetScreenHeight () - 2);
-
-    //
-    // Page indicator
-    //
-    UiSetColor (COLOR_WARNING, COLOR_BG);
-    UiPrintAt (55, 1, L"Page %d/%d", (int)CurrentPage, (int)SYSINFO_TOTAL_PAGES);
-
-    //
-    // Draw current page
-    //
-    switch (CurrentPage) {
-      case 1:
-        DrawSysInfoPage1 (&FwInfo, &SysInfo);
-        break;
-      case 2:
-        DrawSysInfoPage2 (&CpuInfo, &MemInfo);
-        break;
-      case 3:
-        DrawSysInfoPage3 (PciDevices, PciCount, PciScroll);
-        break;
-      case 4:
-        DrawSysInfoPage4 (DriverList, DrvCount, DrvScroll, FALSE);
-        break;
-      case 5:
-        DrawSysInfoPage5 (&AcpiInfo);
-        break;
-    }
-
-    UiDrawStatusBar (L"[<-/->] Page  [Up/Down] Scroll  [ESC] Back");
-
-    Key = UiWaitKey ();
-
-    if (Key.ScanCode == SCAN_RIGHT) {
-      if (CurrentPage < SYSINFO_TOTAL_PAGES) {
-        CurrentPage++;
-        PciScroll = 0;
-        DrvScroll = 0;
-      }
-    } else if (Key.ScanCode == SCAN_LEFT) {
-      if (CurrentPage > 1) {
-        CurrentPage--;
-        PciScroll = 0;
-        DrvScroll = 0;
-      }
-    } else if (Key.ScanCode == SCAN_DOWN) {
-      if (CurrentPage == 3 && PciScroll + 16 < PciCount) {
-        PciScroll++;
-      } else if (CurrentPage == 4 && DrvScroll + 15 < DrvCount) {
-        DrvScroll++;
-      }
-    } else if (Key.ScanCode == SCAN_UP) {
-      if (CurrentPage == 3 && PciScroll > 0) {
-        PciScroll--;
-      } else if (CurrentPage == 4 && DrvScroll > 0) {
-        DrvScroll--;
-      }
-    } else if (Key.ScanCode == SCAN_ESC) {
-      Running = FALSE;
-    } else if (Key.UnicodeChar == L'q' || Key.UnicodeChar == L'Q') {
-      Running = FALSE;
-    }
-  }
-
-  //
-  // Free allocated memory
-  //
-  if (PciDevices != NULL) {
-    FreePool (PciDevices);
-  }
-
-  if (DriverList != NULL) {
-    FreePool (DriverList);
-  }
-
-  return EFI_SUCCESS;
-}
 
 /**
   Handle main menu key selection.
@@ -643,72 +164,185 @@ GetSnpStateName (
 }
 
 /**
-  Draw NIC list view with selection highlight.
+  Draw NIC list view with two sections: SNP and PCI NIC.
 **/
 STATIC
 VOID
 DrawNicList (
-  IN NIC_INFO  *Nics,
-  IN UINTN     NicCount,
-  IN UINTN     Selected
+  IN NIC_INFO      *Nics,
+  IN UINTN         NicCount,
+  IN PCI_NIC_INFO  *PciNics,
+  IN UINTN         PciNicCount,
+  IN UINTN         Selected,
+  IN UINTN         ScrollOffset
   )
 {
   UINTN   I;
   UINTN   Row;
+  UINTN   ScrH;
+  UINTN   MaxRows;
+  UINTN   TotalRows;
+  UINTN   CurrentRow;
   CHAR16  MacStr[20];
-  CHAR16  IpStr[20];
+  UINTN   BoxW;
 
-  {
-    UINTN  BoxW;
-    BoxW = UiGetScreenWidth () - 2;
-    if (BoxW < 76) BoxW = 76;
+  ScrH = UiGetScreenHeight ();
+  BoxW = UiGetScreenWidth () - 2;
+  if (BoxW < 76) BoxW = 76;
 
-    UiSetColor (COLOR_HEADER, COLOR_BG);
-    UiDrawBox (1, 3, BoxW, 3, L"Network Interfaces");
-  }
+  //
+  // Box header (rows 3-5)
+  //
+  UiSetColor (COLOR_HEADER, COLOR_BG);
+  UiDrawBox (1, 3, BoxW, 3, L"Network Interfaces");
 
   UiSetColor (COLOR_INFO, COLOR_BG);
-  UiPrintAt (3, 4, L"  Found: %d interface(s)", (int)NicCount);
+  UiPrintAt (3, 4, L"  SNP: %d  |  PCI NIC: %d", (int)NicCount, (int)PciNicCount);
 
-  if (NicCount == 0) {
+  MaxRows = (ScrH > 10) ? (ScrH - 9) : 14;
+
+  if (NicCount == 0 && PciNicCount == 0) {
+    UiClearLines (6, 6 + MaxRows);
     UiSetColor (COLOR_WARNING, COLOR_BG);
     UiPrintAt (3, 7, L"  No network interfaces detected.");
     UiPrintAt (3, 9, L"  Make sure network drivers are loaded.");
     return;
   }
 
-  //
-  // Table header
-  //
-  Row = 6;
-  UiSetColor (COLOR_WARNING, COLOR_BG);
-  UiPrintAt (2, Row, L" # %-12s %-26s %-18s %-7s %-15s",
-             L"Vendor", L"Model", L"MAC Address", L"Media", L"Address");
-  Row++;
+  TotalRows = 1 + NicCount * 2 + 1 + 1 + PciNicCount * 2;
 
-  for (I = 0; I < NicCount && Row < 22; I++) {
+  Row = 6;
+  CurrentRow = 0;
+
+  //
+  // === SNP Section Header ===
+  //
+  if (CurrentRow >= ScrollOffset && (CurrentRow - ScrollOffset) < MaxRows) {
+    UiSetColor (COLOR_LAYER2, COLOR_BG);
+    UiPrintAt (2, Row, L" SNP Network Interfaces (%d)", (int)NicCount);
+    Row++;
+  }
+  CurrentRow++;
+
+  //
+  // === SNP Entries (2 rows each) ===
+  //
+  for (I = 0; I < NicCount; I++) {
     UtilFormatMac (Nics[I].CurrentMac.Addr, MacStr);
 
-    if (Nics[I].HasIpConfig) {
-      UtilFormatIpv4 (Nics[I].Ipv4Address.Addr, IpStr);
-    } else {
-      UtilSafeStrCpy (IpStr, L"--", 20);
+    if (CurrentRow >= ScrollOffset && (CurrentRow - ScrollOffset) < MaxRows) {
+      if (I == Selected) {
+        UiSetColor (EFI_WHITE, EFI_BACKGROUND_BLUE);
+      } else {
+        UiSetColor (COLOR_DEFAULT, COLOR_BG);
+      }
+      UiPrintAt (2, Row, L"  [%d] %-24.24s %s",
+                 (int)I, Nics[I].Name, MacStr);
+      Row++;
     }
+    CurrentRow++;
 
-    if (I == Selected) {
-      UiSetColor (EFI_WHITE, EFI_BACKGROUND_BLUE);
-    } else {
-      UiSetColor (COLOR_DEFAULT, COLOR_BG);
+    if (CurrentRow >= ScrollOffset && (CurrentRow - ScrollOffset) < MaxRows) {
+      if (I == Selected) {
+        UiSetColor (EFI_LIGHTGRAY, EFI_BACKGROUND_BLUE);
+      } else {
+        UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
+      }
+      UiPrintAt (2, Row, L"       %s | Link: %-4s | %04X:%04X",
+                 GetSnpStateName (Nics[I].State),
+                 Nics[I].MediaPresent ? L"UP" : L"DOWN",
+                 Nics[I].HasPciInfo ? Nics[I].PciVendorId : 0,
+                 Nics[I].HasPciInfo ? Nics[I].PciDeviceId : 0);
+      Row++;
     }
+    CurrentRow++;
+  }
 
-    UiPrintAt (2, Row, L" %d %-12s %-26.26s %-18s %-7s %-15s",
-               (int)(I + 1),
-               Nics[I].HasPciInfo ? Nics[I].VendorName : L"Unknown",
-               Nics[I].HasPciInfo ? Nics[I].DeviceModel : L"--",
-               MacStr,
-               Nics[I].MediaPresent ? L"Up" : L"Down",
-               IpStr);
+  //
+  // === Blank separator ===
+  //
+  if (CurrentRow >= ScrollOffset && (CurrentRow - ScrollOffset) < MaxRows) {
     Row++;
+  }
+  CurrentRow++;
+
+  //
+  // === PCI NIC Section Header ===
+  //
+  if (CurrentRow >= ScrollOffset && (CurrentRow - ScrollOffset) < MaxRows) {
+    UiSetColor (COLOR_LAYER3, COLOR_BG);
+    UiPrintAt (2, Row, L" PCI Network Controllers (%d)", (int)PciNicCount);
+    Row++;
+  }
+  CurrentRow++;
+
+  //
+  // === PCI NIC Entries (2 rows each) ===
+  //
+  for (I = 0; I < PciNicCount; I++) {
+    if (CurrentRow >= ScrollOffset && (CurrentRow - ScrollOffset) < MaxRows) {
+      if (Selected >= NicCount && I == Selected - NicCount) {
+        UiSetColor (EFI_WHITE, EFI_BACKGROUND_BLUE);
+      } else {
+        if (!PciNics[I].HasDriver) {
+          UiSetColor (COLOR_ERROR, COLOR_BG);          // No driver: RED
+        } else if (PciNics[I].HasMac && PciNics[I].MediaPresent) {
+          UiSetColor (COLOR_SUCCESS, COLOR_BG);        // Driver + Link UP: GREEN
+        } else if (PciNics[I].HasMac && !PciNics[I].MediaPresent) {
+          UiSetColor (COLOR_WARNING, COLOR_BG);        // Driver + Link DOWN: YELLOW
+        } else {
+          UiSetColor (COLOR_INFO, COLOR_BG);           // Driver, no MAC info: CYAN
+        }
+      }
+      UiPrintAt (2, Row, L"  [%d] %-20.20s %02X:%02X.%X  %04X:%04X  %s %s",
+                 (int)I,
+                 PciNics[I].DeviceModel,
+                 PciNics[I].Bus, PciNics[I].Dev, PciNics[I].Func,
+                 PciNics[I].VendorId, PciNics[I].DeviceId,
+                 PciNics[I].HasDriver ? L"[DRV OK]" : L"[NO DRV]",
+                 PciNics[I].HasMac ? (PciNics[I].MediaPresent ? L"Link:UP" : L"Link:DN") : L"Link:--");
+      Row++;
+    }
+    CurrentRow++;
+
+    if (CurrentRow >= ScrollOffset && (CurrentRow - ScrollOffset) < MaxRows) {
+      if (Selected >= NicCount && I == Selected - NicCount) {
+        UiSetColor (EFI_LIGHTGRAY, EFI_BACKGROUND_BLUE);
+      } else if (PciNics[I].HasMac) {
+        UiSetColor (PciNics[I].MediaPresent ? COLOR_INFO : EFI_LIGHTGRAY, COLOR_BG);
+      } else {
+        UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
+      }
+
+      if (PciNics[I].HasMac) {
+        UiPrintAt (2, Row,
+                   L"       MAC: %02X:%02X:%02X:%02X:%02X:%02X  Link: %-4s",
+                   PciNics[I].MacAddress[0], PciNics[I].MacAddress[1],
+                   PciNics[I].MacAddress[2], PciNics[I].MacAddress[3],
+                   PciNics[I].MacAddress[4], PciNics[I].MacAddress[5],
+                   PciNics[I].MediaPresent ? L"UP" : L"DOWN");
+      } else {
+        UiPrintAt (2, Row, L"       MAC: N/A (no driver)");
+      }
+      Row++;
+    }
+    CurrentRow++;
+  }
+
+  //
+  // Clear only unused trailing rows (avoids full-area clear flicker).
+  //
+  if (Row <= 6 + MaxRows) {
+    UiClearLines (Row, 6 + MaxRows);
+  }
+
+  //
+  // Scroll indicator
+  //
+  if (TotalRows > MaxRows) {
+    UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
+    UiPrintAt (2, 6 + MaxRows, L"  [Up/Down/PgUp/PgDn] scroll (%d/%d)",
+               (int)(ScrollOffset + 1), (int)TotalRows);
   }
 }
 
@@ -748,7 +382,7 @@ DrawNicDetail (
       UiPrintAt (3, 8, L"  PCI Location : Bus %02X  Dev %02X  Func %X",
                  Nic->PciBus, Nic->PciDev, Nic->PciFunc);
     } else {
-      UiSetColor (EFI_DARKGRAY, COLOR_BG);
+      UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
       UiPrintAt (3, 5, L"  Vendor       : (PCI info not available)");
       UiSetColor (COLOR_INFO, COLOR_BG);
     }
@@ -814,8 +448,85 @@ DrawNicDetail (
     // Device path
     //
     Row += 2;
-    UiSetColor (EFI_DARKGRAY, COLOR_BG);
+    UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
     UiPrintAt (2, Row, L"  Path: %.70s", Nic->DevicePath);
+  }
+}
+
+/**
+  Draw PCI NIC detail view.
+**/
+STATIC
+VOID
+DrawPciNicDetail (
+  IN PCI_NIC_INFO  *Pci
+  )
+{
+  UINTN   Row;
+  UINTN   BoxW;
+
+  BoxW = UiGetScreenWidth () - 2;
+  if (BoxW < 76) BoxW = 76;
+
+  UiClearLines (3, UiGetScreenHeight () - 2);
+
+  //
+  // PCI Hardware box
+  //
+  UiSetColor (COLOR_HEADER, COLOR_BG);
+  UiDrawBox (1, 3, BoxW, 10, L"PCI NIC Hardware");
+
+  UiSetColor (COLOR_INFO, COLOR_BG);
+  UiPrintAt (3, 4,  L"  Vendor       : %s", Pci->VendorName);
+  UiPrintAt (3, 5,  L"  Model        : %s", Pci->DeviceModel);
+  UiPrintAt (3, 6,  L"  PCI IDs      : %04X:%04X", Pci->VendorId, Pci->DeviceId);
+  UiPrintAt (3, 7,  L"  PCI Location : Bus %02X  Dev %02X  Func %X",
+             Pci->Bus, Pci->Dev, Pci->Func);
+
+  if (Pci->HasDriver) {
+    UiSetColor (COLOR_SUCCESS, COLOR_BG);
+    UiPrintAt (3, 9, L"  Driver       : Loaded (SNP active)");
+  } else {
+    UiSetColor (COLOR_ERROR, COLOR_BG);
+    UiPrintAt (3, 9, L"  Driver       : NOT LOADED");
+  }
+
+  if (Pci->HasMac) {
+    UiSetColor (COLOR_INFO, COLOR_BG);
+    UiPrintAt (3, 10, L"  MAC Address  : %02X:%02X:%02X:%02X:%02X:%02X",
+               Pci->MacAddress[0], Pci->MacAddress[1],
+               Pci->MacAddress[2], Pci->MacAddress[3],
+               Pci->MacAddress[4], Pci->MacAddress[5]);
+    UiPrintAt (3, 11, L"  Link Status  : %s",
+               Pci->MediaPresent ? L"UP (connected)" : L"DOWN (no link)");
+  } else {
+    UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
+    UiPrintAt (3, 10, L"  MAC Address  : N/A (no driver)");
+    UiPrintAt (3, 11, L"  Link Status  : N/A (no driver)");
+  }
+
+  //
+  // SNP Match info
+  //
+  Row = 14;
+  UiSetColor (COLOR_HEADER, COLOR_BG);
+  UiDrawBox (1, Row, BoxW, 5, L"SNP Association");
+  Row++;
+
+  if (Pci->MatchedSnp) {
+    UiSetColor (COLOR_SUCCESS, COLOR_BG);
+    UiPrintAt (3, Row, L"  Matched to SNP NIC index: %d", (int)Pci->SnpIndex);
+    Row++;
+    UiSetColor (COLOR_INFO, COLOR_BG);
+    UiPrintAt (3, Row, L"  Use the SNP NIC detail for full protocol info");
+  } else {
+    UiSetColor (COLOR_WARNING, COLOR_BG);
+    UiPrintAt (3, Row, L"  No SNP driver bound to this PCI device");
+    Row++;
+    if (!Pci->HasDriver) {
+      UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
+      UiPrintAt (3, Row, L"  Load a network driver to enable this NIC");
+    }
   }
 }
 
@@ -834,6 +545,15 @@ TestCompanionConnection (
   EFI_IPv4_ADDRESS LocalIp  = DEFAULT_LOCAL_IP;
   EFI_IPv4_ADDRESS CompIp   = DEFAULT_COMPANION_IP;
   EFI_IPv4_ADDRESS Mask     = DEFAULT_SUBNET_MASK;
+
+  //
+  // Companion test uses a dedicated point-to-point link:
+  //   EFI  = 192.168.100.10
+  //   Comp = 192.168.100.1
+  // Do NOT override these from DHCP — companion expects this exact subnet.
+  // UDP4 Configure with UseDefaultAddress=FALSE creates its own IP4 child
+  // with the manual address, independent of whatever DHCP configured.
+  //
   CHAR16          IpStr[20];
   UINTN           Row;
 
@@ -887,19 +607,28 @@ TestCompanionConnection (
   // Step 2: Connect (HELLO handshake)
   //
   UiSetColor (COLOR_WARNING, COLOR_BG);
-  UiPrintAt (3, Row, L"  [2/3] Sending HELLO to companion...");
+  UiPrintAt (3, Row, L"  [2/3] Sending HELLO (3 attempts, SNP direct rx)...");
   Row++;
 
   Status = CompanionConnect (&Link);
 
   if (EFI_ERROR (Status)) {
     UiSetColor (COLOR_ERROR, COLOR_BG);
-    UiPrintAt (3, Row, L"  FAILED: %s", Link.StatusMsg);
+    UiPrintAt (3, Row, L"  FAILED: %s (status=%r)", Link.StatusMsg, Status);
     Row++;
     if (Status == EFI_TIMEOUT) {
-      UiPrintAt (3, Row, L"  No companion found. Is it running?");
+      UiPrintAt (3, Row, L"  No companion found. Is it running on %d.%d.%d.%d:%d?",
+                 (int)CompIp.Addr[0], (int)CompIp.Addr[1],
+                 (int)CompIp.Addr[2], (int)CompIp.Addr[3],
+                 (int)CONTROL_CHANNEL_PORT);
+      Row++;
+      UiPrintAt (3, Row, L"  Run: sudo python3 companion.py -i <iface> --ip %d.%d.%d.%d",
+                 (int)CompIp.Addr[0], (int)CompIp.Addr[1],
+                 (int)CompIp.Addr[2], (int)CompIp.Addr[3]);
+    } else if (Status == EFI_NO_MAPPING) {
+      UiPrintAt (3, Row, L"  ARP failed — companion unreachable. Check cable & IPs.");
     } else {
-      UiPrintAt (3, Row, L"  EFI_STATUS = %r", Status);
+      UiPrintAt (3, Row, L"  Check network link and companion configuration.");
     }
     CompanionDestroy (&Link);
     goto Done;
@@ -947,73 +676,221 @@ ShowNetworkInterfaces (
   )
 {
   NIC_INFO        *Nics;
+  PCI_NIC_INFO    *PciNics;
   UINTN           NicCount;
+  UINTN           PciNicCount;
   EFI_INPUT_KEY   Key;
   BOOLEAN         Running;
   UINTN           Selected;
+  UINTN           ScrollOffset;
   BOOLEAN         DetailView;
+  BOOLEAN         NeedFullClear;
 
   Nics = AllocateZeroPool (MAX_INTERFACES * sizeof (NIC_INFO));
   if (Nics == NULL) {
     return EFI_OUT_OF_RESOURCES;
   }
 
-  NicCount = MAX_INTERFACES;
-  DiscoverNics (Nics, &NicCount);
-
-  Selected = 0;
-  DetailView = FALSE;
-  Running = TRUE;
+  PciNics = AllocateZeroPool (MAX_PCI_NICS * sizeof (PCI_NIC_INFO));
+  if (PciNics == NULL) {
+    FreePool (Nics);
+    return EFI_OUT_OF_RESOURCES;
+  }
 
   //
-  // Initial full draw
+  // Show loading indicator before NIC discovery
   //
   UiClearScreen ();
   UiDrawHeader ();
+  UiSetColor (COLOR_INFO, COLOR_BG);
+  UiPrintAt (3, 6, L"  Discovering network interfaces...");
 
-  while (Running) {
+  NicCount = MAX_INTERFACES;
+  DiscoverNics (Nics, &NicCount);
+
+  PciNicCount = MAX_PCI_NICS;
+  DiscoverPciNics (PciNics, &PciNicCount, Nics, NicCount);
+
+  Selected      = 0;
+  ScrollOffset  = 0;
+  DetailView    = FALSE;
+  NeedFullClear = TRUE;
+  Running       = TRUE;
+
+  for (;;) {
     //
-    // Clear only the content area below the header
+    // === REDRAW ===
     //
-    UiClearLines (3, UiGetScreenHeight () - 2);
+    if (NeedFullClear) {
+      UiClearScreen ();
+      UiDrawHeader ();
+      NeedFullClear = FALSE;
+    }
 
     if (DetailView) {
-      DrawNicDetail (&Nics[Selected]);
-      UiDrawStatusBar (L"[C] Companion Test  [ESC] Back to list");
+      if (Selected < NicCount) {
+        DrawNicDetail (&Nics[Selected]);
+        UiDrawStatusBar (L"[C] Companion Test  [ESC] Back to list");
+      } else {
+        DrawPciNicDetail (&PciNics[Selected - NicCount]);
+        UiDrawStatusBar (L"[ESC] Back to list");
+      }
     } else {
-      DrawNicList (Nics, NicCount, Selected);
+      DrawNicList (Nics, NicCount, PciNics, PciNicCount, Selected, ScrollOffset);
       UiDrawStatusBar (L"[Up/Down] Select  [Enter] Detail  [ESC] Back");
     }
 
-    Key = UiWaitKey ();
+    //
+    // === INPUT LOOP ===
+    //
+    for (;;) {
+      if (UiWaitKeyTimeout (2000, &Key)) {
+        break;
+      }
 
+      //
+      // Timeout — refresh media status (slow HW query, only on idle)
+      //
+      if (DetailView && Selected < NicCount) {
+        BOOLEAN  OldMedia;
+        OldMedia = Nics[Selected].MediaPresent;
+        NicRefreshMedia (&Nics[Selected]);
+        if (Nics[Selected].MediaPresent != OldMedia) {
+          UiSetColor (COLOR_INFO, COLOR_BG);
+          UiPrintAt (3, 12, L"  Media        : %-14s",
+                     Nics[Selected].MediaPresent ? L"Connected" : L"Disconnected");
+          UiResetColor ();
+        }
+      } else if (!DetailView) {
+        //
+        // List view: refresh all NICs on timeout, then redraw
+        //
+        UINTN  NicIdx;
+        for (NicIdx = 0; NicIdx < NicCount; NicIdx++) {
+          NicRefreshMedia (&Nics[NicIdx]);
+        }
+
+        DrawNicList (Nics, NicCount, PciNics, PciNicCount, Selected, ScrollOffset);
+        UiDrawStatusBar (L"[Up/Down] Select  [Enter] Detail  [ESC] Back  (auto-refresh)");
+      }
+    }
+
+    //
+    // === KEY HANDLING ===
+    //
     if (DetailView) {
       if (Key.ScanCode == SCAN_ESC ||
           Key.UnicodeChar == L'q' || Key.UnicodeChar == L'Q') {
-        DetailView = FALSE;
-      } else if (Key.UnicodeChar == L'c' || Key.UnicodeChar == L'C') {
+        DetailView    = FALSE;
+        NeedFullClear = TRUE;
+      } else if ((Key.UnicodeChar == L'c' || Key.UnicodeChar == L'C') &&
+                 Selected < NicCount) {
         TestCompanionConnection (&Nics[Selected]);
+        NeedFullClear = TRUE;
       }
     } else {
       if (Key.ScanCode == SCAN_ESC ||
           Key.UnicodeChar == L'q' || Key.UnicodeChar == L'Q') {
         Running = FALSE;
+        break;
       } else if (Key.ScanCode == SCAN_DOWN) {
-        if (NicCount > 0 && Selected < NicCount - 1) {
-          Selected++;
+        {
+          UINTN  TotalItems;
+
+          TotalItems = NicCount + PciNicCount;
+          if (TotalItems > 0 && Selected < TotalItems - 1) {
+            Selected++;
+
+            //
+            // Auto-scroll: compute visual row for the selected item.
+            // SNP: header(1) + i*2
+            // PCI: header(1) + NicCount*2 + blank(1) + pci_header(1) + j*2
+            //
+            {
+              UINTN  ScrH;
+              UINTN  MaxRows;
+              UINTN  SelVisRow;
+
+              ScrH    = UiGetScreenHeight ();
+              MaxRows = (ScrH > 10) ? (ScrH - 9) : 14;
+
+              if (Selected < NicCount) {
+                SelVisRow = 1 + Selected * 2;
+              } else {
+                SelVisRow = 1 + NicCount * 2 + 1 + 1 + (Selected - NicCount) * 2;
+              }
+
+              if (SelVisRow + 1 >= ScrollOffset + MaxRows) {
+                ScrollOffset = SelVisRow + 2 - MaxRows;
+              }
+            }
+          }
         }
       } else if (Key.ScanCode == SCAN_UP) {
         if (Selected > 0) {
           Selected--;
+          {
+            UINTN  SelVisRow;
+
+            if (Selected < NicCount) {
+              SelVisRow = 1 + Selected * 2;
+            } else {
+              SelVisRow = 1 + NicCount * 2 + 1 + 1 + (Selected - NicCount) * 2;
+            }
+
+            if (SelVisRow < ScrollOffset) {
+              ScrollOffset = SelVisRow;
+            }
+          }
         }
       } else if (Key.UnicodeChar == CHAR_CARRIAGE_RETURN) {
-        if (NicCount > 0) {
-          DetailView = TRUE;
+        if (NicCount + PciNicCount > 0) {
+          DetailView    = TRUE;
+          NeedFullClear = TRUE;
+        }
+      } else if (Key.ScanCode == SCAN_PAGE_DOWN) {
+        //
+        // Scroll down (PCI section may be off-screen)
+        //
+        {
+          UINTN  TotalRows;
+          UINTN  ScrH;
+          UINTN  MaxRows;
+
+          TotalRows = 1 + NicCount * 2 + 1 + 1 + PciNicCount * 2;
+          ScrH      = UiGetScreenHeight ();
+          MaxRows   = (ScrH > 10) ? (ScrH - 9) : 14;
+
+          if (ScrollOffset + MaxRows < TotalRows) {
+            ScrollOffset += MaxRows / 2;
+            if (ScrollOffset + MaxRows > TotalRows) {
+              ScrollOffset = (TotalRows > MaxRows) ? TotalRows - MaxRows : 0;
+            }
+          }
+        }
+      } else if (Key.ScanCode == SCAN_PAGE_UP) {
+        {
+          UINTN  ScrH;
+          UINTN  MaxRows;
+
+          ScrH    = UiGetScreenHeight ();
+          MaxRows = (ScrH > 10) ? (ScrH - 9) : 14;
+
+          if (ScrollOffset > MaxRows / 2) {
+            ScrollOffset -= MaxRows / 2;
+          } else {
+            ScrollOffset = 0;
+          }
         }
       }
     }
+
+    if (!Running) {
+      break;
+    }
   }
 
+  FreePool (PciNics);
   FreePool (Nics);
   return EFI_SUCCESS;
 }
@@ -1089,7 +966,7 @@ DrawTestResults (
   Print (L"  FAIL:%d", (int)FailCount);
   UiSetColor (COLOR_WARNING, COLOR_BG);
   Print (L"  WARN:%d", (int)WarnCount);
-  UiSetColor (EFI_DARKGRAY, COLOR_BG);
+  UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
   Print (L"  SKIP:%d", (int)SkipCount);
   UiSetColor (COLOR_ERROR, COLOR_BG);
   Print (L"  ERR:%d", (int)ErrCount);
@@ -1115,7 +992,7 @@ DrawTestResults (
       case TEST_RESULT_PASS:  UiSetColor (COLOR_SUCCESS, COLOR_BG); break;
       case TEST_RESULT_FAIL:  UiSetColor (COLOR_ERROR, COLOR_BG);   break;
       case TEST_RESULT_WARN:  UiSetColor (COLOR_WARNING, COLOR_BG); break;
-      case TEST_RESULT_SKIP:  UiSetColor (EFI_DARKGRAY, COLOR_BG);  break;
+      case TEST_RESULT_SKIP:  UiSetColor (EFI_LIGHTGRAY, COLOR_BG);  break;
       case TEST_RESULT_ERROR: UiSetColor (COLOR_ERROR, COLOR_BG);   break;
       default:                UiSetColor (COLOR_DEFAULT, COLOR_BG);  break;
     }
@@ -1130,11 +1007,28 @@ DrawTestResults (
   }
 
   if (Count > MaxRows) {
-    UiSetColor (EFI_DARKGRAY, COLOR_BG);
+    UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
     UiPrintAt (2, 8 + (int)MaxRows, L"  [Up/Down] scroll (%d-%d of %d)",
                (int)(ScrollOffset + 1),
                (int)((ScrollOffset + MaxRows < Count) ? ScrollOffset + MaxRows : Count),
                (int)Count);
+  }
+}
+
+/**
+  ARP warm-up completion callback.
+  Sets the BOOLEAN flag pointed to by Context to TRUE.
+**/
+STATIC
+VOID
+EFIAPI
+ArpWarmupNotify (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  if (Context != NULL) {
+    *((BOOLEAN *)Context) = TRUE;
   }
 }
 
@@ -1181,6 +1075,181 @@ ExecuteTestsWithProgress (
   UiPrintAt (3, 4, L"  %s", RegGetLayerName (Layer));
   UiPrintAt (3, 5, L"  NIC: %s", Nic->Name);
 
+  //
+  // Refresh media status early — needed for accurate report header and
+  // for the SNP warm-up to check MediaPresent before sending frames.
+  //
+  NicRefreshMedia (Nic);
+
+  //
+  // Phase 1: Send ARP request via raw SNP to detect link + prime network.
+  // Some NICs (Intel I219-LM) don't update Mode->MediaPresent via GetStatus
+  // but Transmit works fine when the link is actually up.
+  // Sending a proper ARP request (instead of a nonsense probe) ensures:
+  //  - Link detection (Transmit succeeds → link is up)
+  //  - Gateway sees our MAC/IP mapping (learns our address)
+  //  - If reply comes back via MNP timer, ARP cache gets populated
+  //
+  if (Config->TargetIp.Addr[0] != 0 && Nic->Snp != NULL &&
+      Nic->Snp->Mode != NULL &&
+      Nic->Snp->Mode->State == EfiSimpleNetworkInitialized) {
+    UINT8  ArpFrame[64];
+    UINTN  ArpLen;
+    UINT8  *SrcIpPtr;
+
+    UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
+    UiPrintAt (3, 7, L"  Network warm-up: detecting link...");
+
+    SrcIpPtr = (Nic->HasIpConfig && Nic->Ipv4Address.Addr[0] != 0)
+               ? Nic->Ipv4Address.Addr
+               : Config->LocalIp.Addr;
+
+    ArpLen = PktBuildArpRequest (
+               ArpFrame,
+               Nic->Snp->Mode->CurrentAddress.Addr,
+               SrcIpPtr,
+               Config->TargetIp.Addr
+               );
+
+    if (!EFI_ERROR (Nic->Snp->Transmit (Nic->Snp, 0, ArpLen,
+                                          ArpFrame, NULL, NULL, NULL))) {
+      Nic->MediaPresent = TRUE;
+    }
+
+    {
+      UINT32  Tmp = 0;
+      VOID    *Rb = NULL;
+      Nic->Snp->GetStatus (Nic->Snp, &Tmp, &Rb);  // Drain TX
+    }
+
+    //
+    // Also send ARP for gateway if different from target
+    //
+    if (Config->Gateway.Addr[0] != 0 &&
+        CompareMem (&Config->Gateway, &Config->TargetIp, 4) != 0) {
+      ArpLen = PktBuildArpRequest (
+                 ArpFrame,
+                 Nic->Snp->Mode->CurrentAddress.Addr,
+                 SrcIpPtr,
+                 Config->Gateway.Addr
+                 );
+      Nic->Snp->Transmit (Nic->Snp, 0, ArpLen, ArpFrame, NULL, NULL, NULL);
+      {
+        UINT32  Tmp2 = 0;
+        VOID    *Rb2 = NULL;
+        Nic->Snp->GetStatus (Nic->Snp, &Tmp2, &Rb2);
+      }
+    }
+  }
+
+  //
+  // Phase 2: Non-blocking ARP warm-up via EFI_ARP_PROTOCOL.
+  // KEY INSIGHT: Blocking Arp->Request(NULL) raises TPL to TPL_CALLBACK,
+  // which prevents MNP timer events (also TPL_CALLBACK) from firing.
+  // MNP can't poll SNP for incoming frames, so ARP replies are never
+  // processed — the blocking call always times out.
+  //
+  // FIX: Use non-blocking Arp->Request(Event) which returns immediately,
+  // then poll at TPL_APPLICATION via gBS->Stall(). At TPL_APPLICATION,
+  // MNP's 10ms timer can fire, poll SNP->Receive, deliver ARP replies
+  // to the ARP module, and signal our completion event.
+  //
+  if (Config->TargetIp.Addr[0] != 0 && Nic->HasArp) {
+    EFI_SERVICE_BINDING_PROTOCOL  *ArpSb;
+    EFI_ARP_PROTOCOL              *Arp;
+    EFI_HANDLE                    ArpChild;
+    EFI_ARP_CONFIG_DATA           ArpCfg;
+    EFI_IPv4_ADDRESS              StaAddr;
+    EFI_MAC_ADDRESS               Resolved;
+    UINT8                         *SrcIp;
+    BOOLEAN                       ArpDone;
+    EFI_EVENT                     ArpEvent;
+
+    UiPrintAt (3, 7, L"  Network warm-up: resolving ARP...");
+
+    ArpSb    = NULL;
+    Arp      = NULL;
+    ArpChild = NULL;
+    ArpEvent = NULL;
+
+    SrcIp = (Nic->HasIpConfig && Nic->Ipv4Address.Addr[0] != 0)
+            ? Nic->Ipv4Address.Addr
+            : Config->LocalIp.Addr;
+
+    if (!EFI_ERROR (gBS->OpenProtocol (Nic->Handle,
+          &gEfiArpServiceBindingProtocolGuid, (VOID **)&ArpSb,
+          gImageHandle, Nic->Handle, EFI_OPEN_PROTOCOL_GET_PROTOCOL)) &&
+        !EFI_ERROR (ArpSb->CreateChild (ArpSb, &ArpChild)) &&
+        !EFI_ERROR (gBS->OpenProtocol (ArpChild,
+          &gEfiArpProtocolGuid, (VOID **)&Arp,
+          gImageHandle, Nic->Handle, EFI_OPEN_PROTOCOL_GET_PROTOCOL))) {
+
+      CopyMem (&StaAddr, SrcIp, 4);
+      ZeroMem (&ArpCfg, sizeof (ArpCfg));
+      ArpCfg.SwAddressType   = 0x0800;
+      ArpCfg.SwAddressLength = 4;
+      ArpCfg.StationAddress  = &StaAddr;
+      ArpCfg.EntryTimeOut    = 0;          // No cache expiry
+      ArpCfg.RetryCount      = 10;         // 10 retries = 10 seconds
+      ArpCfg.RetryTimeOut    = 10000000;   // 1 second per retry
+
+      if (!EFI_ERROR (Arp->Configure (Arp, &ArpCfg))) {
+        //
+        // Non-blocking ARP request for target IP.
+        // Create event + callback, Arp->Request returns immediately,
+        // then we poll at TPL_APPLICATION so MNP timer can process replies.
+        //
+        ArpDone = FALSE;
+        if (!EFI_ERROR (gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+              ArpWarmupNotify, &ArpDone, &ArpEvent))) {
+          ZeroMem (&Resolved, sizeof (Resolved));
+          if (!EFI_ERROR (Arp->Request (Arp, &Config->TargetIp, ArpEvent, &Resolved))) {
+            //
+            // Poll at TPL_APPLICATION — MNP's 10ms timer fires between
+            // Stall calls, receives ARP reply from SNP, delivers to ARP
+            // module, which signals our ArpEvent → ArpDone = TRUE.
+            // Wait up to 10 seconds.
+            //
+            for (I = 0; I < 10000 && !ArpDone; I++) {
+              gBS->Stall (1000);  // 1ms
+            }
+          }
+
+          gBS->CloseEvent (ArpEvent);
+          ArpEvent = NULL;
+        }
+
+        //
+        // Also resolve gateway if different (non-blocking)
+        //
+        if (Config->Gateway.Addr[0] != 0 &&
+            CompareMem (&Config->Gateway, &Config->TargetIp, 4) != 0) {
+          ArpDone = FALSE;
+          if (!EFI_ERROR (gBS->CreateEvent (EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+                ArpWarmupNotify, &ArpDone, &ArpEvent))) {
+            ZeroMem (&Resolved, sizeof (Resolved));
+            if (!EFI_ERROR (Arp->Request (Arp, &Config->Gateway, ArpEvent, &Resolved))) {
+              for (I = 0; I < 5000 && !ArpDone; I++) {
+                gBS->Stall (1000);  // 1ms, 5s max for gateway
+              }
+            }
+
+            gBS->CloseEvent (ArpEvent);
+            ArpEvent = NULL;
+          }
+        }
+
+        Arp->Configure (Arp, NULL);
+      }
+    }
+
+    if (ArpChild != NULL && ArpSb != NULL) {
+      ArpSb->DestroyChild (ArpSb, ArpChild);
+    }
+
+    UiPrintAt (3, 7, L"  Network warm-up complete.             ");
+  }
+
   for (I = 0; I < TestCount; I++) {
     Percent = (TestCount > 0) ? ((I * 100) / TestCount) : 0;
 
@@ -1195,7 +1264,7 @@ ExecuteTestsWithProgress (
 
     UiDrawProgress (3, 10, BarW, Percent, L"Progress");
 
-    UiSetColor (EFI_DARKGRAY, COLOR_BG);
+    UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
     UiPrintAt (3, 12, L"  Type: %-12s |  Target: %s",
                RegGetTypeName (Tests[I]->Type),
                Tests[I]->RequiresTarget ? L"Required    " : L"Not needed  ");
@@ -1295,7 +1364,7 @@ ShowTestMenu (
     CopyMem (&Config.TargetIp, &TmpComp, sizeof (EFI_IPv4_ADDRESS));
     Config.TimeoutMs     = 3000;
     Config.Iterations    = 1;
-    Config.TargetPort    = 80;
+    Config.TargetPort    = 0;
     Config.CompanionPort = CONTROL_CHANNEL_PORT;
   }
 
@@ -1352,7 +1421,7 @@ ShowTestMenu (
       UiSetColor (COLOR_DEFAULT, COLOR_BG);
       UiPrintAt (5, 16, L"[A] All Layers               (36 tests)");
 
-      UiSetColor (EFI_DARKGRAY, COLOR_BG);
+      UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
       UiPrintAt (5, 18, L"[N] Change NIC  [T] Change Target IP");
       UiPrintAt (5, 19, L"[ESC] Back to main menu");
 
@@ -1409,6 +1478,30 @@ ShowTestMenu (
       ResultCount  = 0;
       ResultScroll = 0;
 
+      //
+      // Update Config from NIC's actual IP configuration (DHCP/static).
+      // Hardcoded defaults (192.168.100.x) won't work if NIC is on
+      // a different subnet.
+      //
+      if (Nics[SelectedNic].HasIpConfig) {
+        CopyMem (&Config.LocalIp, &Nics[SelectedNic].Ipv4Address, sizeof (EFI_IPv4_ADDRESS));
+        CopyMem (&Config.SubnetMask, &Nics[SelectedNic].SubnetMask, sizeof (EFI_IPv4_ADDRESS));
+        if (Nics[SelectedNic].Gateway.Addr[0] != 0 ||
+            Nics[SelectedNic].Gateway.Addr[1] != 0 ||
+            Nics[SelectedNic].Gateway.Addr[2] != 0 ||
+            Nics[SelectedNic].Gateway.Addr[3] != 0) {
+          CopyMem (&Config.Gateway, &Nics[SelectedNic].Gateway, sizeof (EFI_IPv4_ADDRESS));
+          //
+          // If no explicit target was set, use gateway as default target
+          // (most likely to respond to ARP/ICMP)
+          //
+          if (Config.TargetIp.Addr[0] == 192 && Config.TargetIp.Addr[1] == 168 &&
+              Config.TargetIp.Addr[2] == 100 && Config.TargetIp.Addr[3] == 1) {
+            CopyMem (&Config.TargetIp, &Nics[SelectedNic].Gateway, sizeof (EFI_IPv4_ADDRESS));
+          }
+        }
+      }
+
       ExecuteTestsWithProgress (
         SelectedLayer,
         &Nics[SelectedNic],
@@ -1432,7 +1525,7 @@ ShowTestMenu (
       //
       UiClearLines (3, UiGetScreenHeight () - 2);
       DrawTestResults (TestPtrs, Results, ResultCount, SelectedLayer, ResultScroll);
-      UiDrawStatusBar (L"[Up/Down] Scroll  [R] Run again  [ESC] Back to menu");
+      UiDrawStatusBar (L"[Up/Down] Scroll  [E] Export  [R] Run again  [ESC] Back");
 
       Key = UiWaitKey ();
 
@@ -1450,12 +1543,44 @@ ShowTestMenu (
         if (ResultScroll > 0) {
           ResultScroll--;
         }
+      } else if (Key.UnicodeChar == L'e' || Key.UnicodeChar == L'E') {
+        //
+        // Export current results to file
+        //
+        ExportTestResults (
+          &Nics[SelectedNic],
+          &Config,
+          TestPtrs,
+          Results,
+          ResultCount,
+          SelectedLayer
+          );
+
+        //
+        // Redraw after export screen
+        //
+        UiClearScreen ();
+        UiDrawHeader ();
       } else if (Key.UnicodeChar == L'r' || Key.UnicodeChar == L'R') {
         //
         // Re-run the same tests
         //
         ResultCount  = 0;
         ResultScroll = 0;
+
+        //
+        // Refresh Config from NIC (IP may have changed via DHCP renewal)
+        //
+        if (Nics[SelectedNic].HasIpConfig) {
+          CopyMem (&Config.LocalIp, &Nics[SelectedNic].Ipv4Address, sizeof (EFI_IPv4_ADDRESS));
+          CopyMem (&Config.SubnetMask, &Nics[SelectedNic].SubnetMask, sizeof (EFI_IPv4_ADDRESS));
+          if (Nics[SelectedNic].Gateway.Addr[0] != 0 ||
+              Nics[SelectedNic].Gateway.Addr[1] != 0 ||
+              Nics[SelectedNic].Gateway.Addr[2] != 0 ||
+              Nics[SelectedNic].Gateway.Addr[3] != 0) {
+            CopyMem (&Config.Gateway, &Nics[SelectedNic].Gateway, sizeof (EFI_IPv4_ADDRESS));
+          }
+        }
 
         ExecuteTestsWithProgress (
           SelectedLayer,

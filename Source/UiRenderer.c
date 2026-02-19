@@ -131,10 +131,14 @@ UiClearLines (
   }
 
   //
-  // Build a blank line buffer (up to 255 columns)
+  // Build a blank line buffer (up to 254 columns).
+  // Use Cols-1 to avoid cursor wrap at the right edge.
   //
   if (Cols > 255) {
     Cols = 255;
+  }
+  if (Cols > 0) {
+    Cols--;
   }
   for (I = 0; I < Cols; I++) {
     BlankBuf[I] = L' ';
@@ -194,12 +198,27 @@ UiPrintAt (
 {
   VA_LIST  Args;
   CHAR16   Buffer[256];
+  UINTN    Cols;
+  UINTN    Rows;
+  UINTN    MaxLen;
 
   gST->ConOut->SetCursorPosition (gST->ConOut, Col, Row);
 
   VA_START (Args, Fmt);
   UnicodeVSPrint (Buffer, sizeof (Buffer), Fmt, Args);
   VA_END (Args);
+
+  //
+  // Clip output to prevent line wrapping and screen scrolling.
+  // Leave 1 column margin to avoid cursor-advance wrap on some firmware.
+  //
+  gST->ConOut->QueryMode (gST->ConOut, gST->ConOut->Mode->Mode, &Cols, &Rows);
+  if (Col < Cols) {
+    MaxLen = Cols - Col - 1;
+    if (StrLen (Buffer) > MaxLen) {
+      Buffer[MaxLen] = L'\0';
+    }
+  }
 
   Print (L"%s", Buffer);
 }
@@ -398,7 +417,7 @@ UiDrawProgress (
     Print (L"%c", PROGRESS_FILLED);
   }
 
-  UiSetColor (EFI_DARKGRAY, COLOR_BG);
+  UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
   for (I = Filled; I < BarWidth; I++) {
     Print (L"%c", PROGRESS_EMPTY);
   }
@@ -444,12 +463,20 @@ UiDrawStatusBar (
 {
   UINTN  Rows;
   UINTN  Cols;
+  UINTN  PadWidth;
 
   gST->ConOut->QueryMode (gST->ConOut, gST->ConOut->Mode->Mode, &Cols, &Rows);
 
+  //
+  // On the last row, total output must be < Cols to avoid cursor wrap
+  // which scrolls the entire screen up. Use Cols-2 padding so total
+  // output = 1 (space) + (Cols-2) = Cols-1 characters.
+  //
+  PadWidth = (Cols > 2) ? (Cols - 2) : 1;
+
   gST->ConOut->SetCursorPosition (gST->ConOut, 0, Rows - 1);
   UiSetColor (EFI_BLACK, EFI_LIGHTGRAY);
-  Print (L" %-*s", (UINTN)(Cols - 1), Message);
+  Print (L" %-*s", PadWidth, Message);
   UiResetColor ();
 }
 
@@ -470,6 +497,68 @@ UiWaitKey (
   gST->ConIn->ReadKeyStroke (gST->ConIn, &Key);
 
   return Key;
+}
+
+/**
+  Wait for a key press with timeout.
+  Returns TRUE if a key was pressed, FALSE if timed out.
+  On timeout, the caller can redraw the screen and call again.
+
+  @param[in]  TimeoutMs  Timeout in milliseconds.
+  @param[out] Key        The pressed key (valid only if TRUE returned).
+
+  @retval TRUE   Key was pressed.
+  @retval FALSE  Timeout expired, no key pressed.
+**/
+BOOLEAN
+UiWaitKeyTimeout (
+  IN  UINT32          TimeoutMs,
+  OUT EFI_INPUT_KEY   *Key
+  )
+{
+  EFI_STATUS  Status;
+  EFI_EVENT   TimerEvent;
+  EFI_EVENT   Events[2];
+  UINTN       EventIndex;
+
+  ZeroMem (Key, sizeof (EFI_INPUT_KEY));
+
+  //
+  // Create one-shot timer event
+  //
+  Status = gBS->CreateEvent (EVT_TIMER, 0, NULL, NULL, &TimerEvent);
+  if (EFI_ERROR (Status)) {
+    //
+    // Fallback to blocking wait if timer creation fails
+    //
+    *Key = UiWaitKey ();
+    return TRUE;
+  }
+
+  //
+  // Set timer: TimeoutMs * 10000 converts ms to 100ns units
+  //
+  gBS->SetTimer (TimerEvent, TimerRelative, (UINT64)TimeoutMs * 10000);
+
+  Events[0] = gST->ConIn->WaitForKey;
+  Events[1] = TimerEvent;
+
+  gBS->WaitForEvent (2, Events, &EventIndex);
+
+  if (EventIndex == 0) {
+    //
+    // Key was pressed
+    //
+    gST->ConIn->ReadKeyStroke (gST->ConIn, Key);
+    gBS->CloseEvent (TimerEvent);
+    return TRUE;
+  }
+
+  //
+  // Timer expired — no key pressed
+  //
+  gBS->CloseEvent (TimerEvent);
+  return FALSE;
 }
 
 /**

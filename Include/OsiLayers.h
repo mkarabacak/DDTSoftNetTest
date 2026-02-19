@@ -235,4 +235,22 @@ EFI_STATUS StressTestGetStats (
   OUT TEST_RESULT_DATA *Result
   );
 
+//
+// ============================================================
+// ReportExporter public functions
+// ============================================================
+//
+
+//
+// Export existing test results (called from Run Tests menu)
+//
+EFI_STATUS ExportTestResults (
+  IN NIC_INFO          *Nic,
+  IN TEST_CONFIG       *Config,
+  IN TEST_DEFINITION   **TestDefs,
+  IN TEST_RESULT_DATA  *Results,
+  IN UINTN             ResultCount,
+  IN OSI_LAYER         Layer
+  );
+
 #endif // OSI_LAYERS_H_
