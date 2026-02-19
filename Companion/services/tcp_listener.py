@@ -2,13 +2,17 @@
 TCP Listener - L4 Transport Layer
 Multi-port TCP listener for connection testing.
 Accepts connections and optionally echoes data.
+Recognizes DDTECHO probe messages and tracks probe statistics.
 """
 
 import logging
 import socket
 import threading
+import time
 
 logger = logging.getLogger("tcp")
+
+DDTECHO_PREFIX = b"DDTECHO|"
 
 
 class TcpListener:
@@ -21,6 +25,10 @@ class TcpListener:
         self.threads = []
         self.running = False
         self.connection_count = 0
+        # Probe tracking
+        self.probe_count = 0
+        self.probe_last_id = None
+        self.probe_last_time = None
         self.lock = threading.Lock()
 
     def prepare(self, test, args):
@@ -31,7 +39,9 @@ class TcpListener:
         pass
 
     def get_result(self):
-        return f"connections={self.connection_count}"
+        with self.lock:
+            return (f"connections={self.connection_count},"
+                    f"probes={self.probe_count}")
 
     def start(self):
         """Start TCP listeners on all configured ports."""
@@ -85,6 +95,28 @@ class TcpListener:
                 daemon=True)
             t.start()
 
+    def _parse_probe(self, data):
+        """Parse DDTECHO probe payload.
+
+        Format: DDTECHO|ID=xxxx|TS=xxxxxxxx  (28 bytes)
+        Returns (seq_id, timestamp) or None.
+        """
+        if not data.startswith(DDTECHO_PREFIX):
+            return None
+        try:
+            text = data[:28].decode("ascii", errors="replace")
+            parts = text.split("|")
+            seq_id = None
+            ts = None
+            for part in parts:
+                if part.startswith("ID="):
+                    seq_id = part[3:]
+                elif part.startswith("TS="):
+                    ts = part[3:]
+            return seq_id, ts
+        except Exception:
+            return None
+
     def _handle_client(self, client, addr, port):
         """Handle a single TCP connection with echo behavior."""
         client.settimeout(5.0)
@@ -111,10 +143,25 @@ class TcpListener:
                 except (socket.timeout, ConnectionResetError):
                     pass
             else:
-                # Echo mode for other ports
+                # Echo mode for other ports (22, 443, etc.)
                 try:
                     data = client.recv(4096)
                     if data:
+                        # Check for DDTECHO probe
+                        probe = self._parse_probe(data)
+                        if probe is not None:
+                            seq_id, ts = probe
+                            with self.lock:
+                                self.probe_count += 1
+                                self.probe_last_id = seq_id
+                                self.probe_last_time = time.time()
+                            logger.info(
+                                "TCP PROBE #%s from %s:%d port %d (total: %d)",
+                                seq_id, addr[0], addr[1], port,
+                                self.probe_count)
+                        else:
+                            logger.debug("TCP echo %d bytes from %s port %d",
+                                         len(data), addr, port)
                         client.sendall(data)
                 except (socket.timeout, ConnectionResetError):
                     pass

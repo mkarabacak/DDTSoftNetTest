@@ -1,12 +1,14 @@
 """
 ARP Responder - L2 Data Link Layer
 Responds to ARP requests for the companion IP address.
+Tracks probe statistics for echo test monitoring.
 """
 
 import logging
 import socket
 import struct
 import threading
+import time
 
 logger = logging.getLogger("arp")
 
@@ -25,6 +27,11 @@ class ArpResponder:
         self.thread = None
         self.running = False
         self.mac = None
+        # Probe tracking
+        self.reply_count = 0
+        self.reply_last_time = None
+        self.reply_sources = {}   # src_ip -> count
+        self.lock = threading.Lock()
 
     def prepare(self, test, args):
         logger.info("ARP prepare: %s", test)
@@ -34,7 +41,8 @@ class ArpResponder:
         pass
 
     def get_result(self):
-        return None
+        with self.lock:
+            return f"replies={self.reply_count}"
 
     def start(self):
         """Start ARP responder on raw socket."""
@@ -54,7 +62,8 @@ class ArpResponder:
         self.running = True
         self.thread = threading.Thread(target=self._respond_loop, daemon=True)
         self.thread.start()
-        logger.info("ARP responder started on %s", self.interface)
+        logger.info("ARP responder started on %s (probe tracking enabled)",
+                     self.interface)
 
     def stop(self):
         self.running = False
@@ -95,12 +104,21 @@ class ArpResponder:
 
             sender_mac = frame[22:28]
             sender_ip = frame[28:32]
+            sender_ip_str = socket.inet_ntoa(sender_ip)
+            sender_mac_str = ":".join(f"{b:02x}" for b in sender_mac)
 
             # Build ARP reply
             reply = self._build_arp_reply(sender_mac, sender_ip, target_ip)
             try:
                 self.sock.send(reply)
-                logger.debug("ARP reply sent to %s", socket.inet_ntoa(sender_ip))
+                with self.lock:
+                    self.reply_count += 1
+                    self.reply_last_time = time.time()
+                    self.reply_sources[sender_ip_str] = \
+                        self.reply_sources.get(sender_ip_str, 0) + 1
+
+                logger.info("ARP REPLY to %s (%s) - total: %d",
+                            sender_ip_str, sender_mac_str, self.reply_count)
             except OSError:
                 pass
 

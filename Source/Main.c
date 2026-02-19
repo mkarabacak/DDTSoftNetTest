@@ -10,6 +10,7 @@
 #include <PciIds.h>
 #include <OsiLayers.h>
 #include <PacketDefs.h>
+#include <ProtocolProbe.h>
 
 //
 // Main menu items
@@ -422,27 +423,61 @@ DrawNicDetail (
                Nic->MultipleTxSupported ? L"Yes" : L"No");
 
     //
-    // Protocol stack box
+    // Protocol Stack — selectable list with echo probe support
     //
     Row = 21;
     UiSetColor (COLOR_HEADER, COLOR_BG);
-    UiDrawBox (1, Row, BoxW, 5, L"Protocol Stack");
+    UiDrawBox (1, Row, BoxW, 10, L"Protocol Stack");
 
     Row++;
-    UiSetColor (COLOR_LAYER3, COLOR_BG);
-    UiPrintAt (3, Row, L"  MNP:%s  ARP:%s  IP4:%s  IP6:%s  TCP4:%s",
-               Nic->HasMnp  ? L"+" : L"-",
-               Nic->HasArp  ? L"+" : L"-",
-               Nic->HasIp4  ? L"+" : L"-",
-               Nic->HasIp6  ? L"+" : L"-",
-               Nic->HasTcp4 ? L"+" : L"-");
+    {
+      UINTN  ProtoIdx;
+      struct {
+        CHAR16   Key;
+        CHAR16   *Name;
+        BOOLEAN  Available;
+        BOOLEAN  CanProbe;
+      } ProtoList[] = {
+        { L'1', L"ARP",   Nic->HasArp  || (Nic->Snp != NULL), ProbeIsAvailable (Nic, ProbeArp)  },
+        { L'2', L"ICMP",  Nic->HasIp4,                         ProbeIsAvailable (Nic, ProbeIcmp) },
+        { L'3', L"UDP4",  Nic->HasUdp4,                        ProbeIsAvailable (Nic, ProbeUdp)  },
+        { L'4', L"TCP4",  Nic->HasTcp4,                        ProbeIsAvailable (Nic, ProbeTcp)  },
+        { L'5', L"DHCP4", Nic->HasDhcp4,                       FALSE },
+        { L'6', L"DNS4",  Nic->HasDns4,                        FALSE },
+        { L'7', L"HTTP",  Nic->HasHttp,                        FALSE },
+      };
+      UINTN  ProtoCount;
+
+      ProtoCount = sizeof (ProtoList) / sizeof (ProtoList[0]);
+
+      for (ProtoIdx = 0; ProtoIdx < ProtoCount; ProtoIdx++) {
+        if (ProtoList[ProtoIdx].Available) {
+          UiSetColor (COLOR_SUCCESS, COLOR_BG);
+          if (ProtoList[ProtoIdx].CanProbe) {
+            UiPrintAt (3, Row, L"  [%c] %-6s  Available (Echo Test)",
+                       ProtoList[ProtoIdx].Key, ProtoList[ProtoIdx].Name);
+          } else {
+            UiPrintAt (3, Row, L"  [%c] %-6s  Available",
+                       ProtoList[ProtoIdx].Key, ProtoList[ProtoIdx].Name);
+          }
+        } else {
+          UiSetColor (EFI_DARKGRAY, COLOR_BG);
+          UiPrintAt (3, Row, L"  [%c] %-6s  N/A",
+                     ProtoList[ProtoIdx].Key, ProtoList[ProtoIdx].Name);
+        }
+        Row++;
+      }
+    }
+
+    //
+    // Extra protocol indicators (MNP, IP6, TLS — no echo test)
+    //
     Row++;
-    UiPrintAt (3, Row, L"  UDP4:%s  DHCP4:%s  DNS4:%s  HTTP:%s  TLS:%s",
-               Nic->HasUdp4  ? L"+" : L"-",
-               Nic->HasDhcp4 ? L"+" : L"-",
-               Nic->HasDns4  ? L"+" : L"-",
-               Nic->HasHttp  ? L"+" : L"-",
-               Nic->HasTls   ? L"+" : L"-");
+    UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
+    UiPrintAt (3, Row, L"  MNP:%s  IP6:%s  TLS:%s",
+               Nic->HasMnp ? L"+" : L"-",
+               Nic->HasIp6 ? L"+" : L"-",
+               Nic->HasTls ? L"+" : L"-");
 
     //
     // Device path
@@ -526,6 +561,192 @@ DrawPciNicDetail (
     if (!Pci->HasDriver) {
       UiSetColor (EFI_LIGHTGRAY, COLOR_BG);
       UiPrintAt (3, Row, L"  Load a network driver to enable this NIC");
+    }
+  }
+}
+
+/**
+  Run periodic protocol echo test.
+  Sends probe with SeqId every ~1 second, shows live stats.
+
+  @param[in] Nic       NIC to test on.
+  @param[in] Protocol  Protocol to probe (ProbeArp, ProbeIcmp, ProbeUdp, ProbeTcp).
+  @param[in] TargetIp  Target IP for probes.
+**/
+STATIC
+VOID
+RunProtocolEchoTest (
+  IN NIC_INFO          *Nic,
+  IN PROBE_PROTOCOL    Protocol,
+  IN EFI_IPv4_ADDRESS  *TargetIp
+  )
+{
+  PROBE_STATS     Stats;
+  EFI_INPUT_KEY   Key;
+  UINTN           BoxW;
+  UINTN           Row;
+  UINTN           I;
+  CHAR16          IpStr[20];
+  CONST CHAR16    *ProtoName;
+
+  ProtoName = ProbeGetName (Protocol);
+  ProbeInit (&Stats, Protocol);
+
+  UiClearScreen ();
+  UiDrawHeader ();
+
+  BoxW = UiGetScreenWidth () - 2;
+  if (BoxW < 66) BoxW = 66;
+
+  //
+  // Title
+  //
+  UtilFormatIpv4 (TargetIp->Addr, IpStr);
+  UiSetColor (COLOR_HEADER, COLOR_BG);
+
+  {
+    CHAR16  Title[80];
+    UnicodeSPrint (Title, sizeof (Title), L"%s Echo Test", ProtoName);
+    UiDrawBox (1, 3, BoxW, 20, Title);
+  }
+
+  //
+  // Static info
+  //
+  UiSetColor (COLOR_INFO, COLOR_BG);
+  UiPrintAt (3, 4, L"  NIC    : %s", Nic->Name);
+  UiPrintAt (3, 5, L"  Target : %s", IpStr);
+  if (Protocol == ProbeUdp) {
+    UiPrintAt (3, 6, L"  Port   : %d (echo)", (int)PROBE_UDP_PORT);
+  } else if (Protocol == ProbeTcp) {
+    UiPrintAt (3, 6, L"  Port   : %d", (int)PROBE_TCP_PORT);
+  }
+
+  UiDrawStatusBar (L"[ESC] Stop echo test");
+
+  //
+  // Probe loop — 1 probe per second
+  //
+  for (;;) {
+    //
+    // Execute one probe
+    //
+    UiSetColor (COLOR_WARNING, COLOR_BG);
+    UiPrintAt (3, 8, L"  Probing #%04d ...", (int)Stats.NextSeqId);
+
+    ProbeExecuteOnce (Nic, TargetIp, &Stats);
+
+    //
+    // Update stats display
+    //
+    UiClearLines (8, 21);
+
+    UiSetColor (COLOR_HEADER, COLOR_BG);
+    UiDrawSeparator (1, 8, BoxW);
+
+    //
+    // Summary line
+    //
+    Row = 9;
+    {
+      UINT32  LossPct;
+
+      if (Stats.Sent > 0) {
+        LossPct = (Stats.Lost * 100) / Stats.Sent;
+      } else {
+        LossPct = 0;
+      }
+
+      UiSetColor (COLOR_INFO, COLOR_BG);
+      UiPrintAt (3, Row, L"  Sent: %d   Recv: %d   Lost: %d (%d%%)",
+                 (int)Stats.Sent, (int)Stats.Received, (int)Stats.Lost, (int)LossPct);
+    }
+
+    Row++;
+    if (Stats.Received > 0) {
+      UiSetColor (COLOR_SUCCESS, COLOR_BG);
+      UiPrintAt (3, Row, L"  RTT:  Last=%dms  Avg=%dms  Min=%dms  Max=%dms",
+                 (int)(Stats.RttLastUs / 1000),
+                 (int)(Stats.RttAvgUs / 1000),
+                 (int)(Stats.RttMinUs / 1000),
+                 (int)(Stats.RttMaxUs / 1000));
+    } else {
+      UiSetColor (EFI_DARKGRAY, COLOR_BG);
+      UiPrintAt (3, Row, L"  RTT:  (no successful probes yet)");
+    }
+
+    //
+    // History — last PROBE_HISTORY_SIZE results
+    //
+    Row += 2;
+    UiSetColor (COLOR_HEADER, COLOR_BG);
+    UiDrawSeparator (1, Row, BoxW);
+    Row++;
+
+    {
+      UINTN  Count;
+      UINTN  Idx;
+      UINTN  DisplayCount;
+
+      Count = Stats.Sent;
+      if (Count > PROBE_HISTORY_SIZE) {
+        Count = PROBE_HISTORY_SIZE;
+      }
+
+      DisplayCount = 0;
+
+      for (I = 0; I < Count && Row < 22; I++) {
+        //
+        // Read from ring buffer, newest first
+        //
+        if (Stats.HistoryHead == 0) {
+          Idx = PROBE_HISTORY_SIZE - 1 - I;
+        } else {
+          Idx = (Stats.HistoryHead - 1 - I + PROBE_HISTORY_SIZE) % PROBE_HISTORY_SIZE;
+        }
+
+        switch (Stats.History[Idx].Status) {
+          case PROBE_STATUS_PASS:
+            UiSetColor (COLOR_SUCCESS, COLOR_BG);
+            UiPrintAt (3, Row, L"  #%04d  PASS   RTT=%dms",
+                       (int)Stats.History[Idx].SeqId,
+                       (int)(Stats.History[Idx].RttUs / 1000));
+            break;
+
+          case PROBE_STATUS_FAIL:
+            UiSetColor (COLOR_ERROR, COLOR_BG);
+            UiPrintAt (3, Row, L"  #%04d  FAIL   error",
+                       (int)Stats.History[Idx].SeqId);
+            break;
+
+          case PROBE_STATUS_TIMEOUT:
+            UiSetColor (COLOR_WARNING, COLOR_BG);
+            UiPrintAt (3, Row, L"  #%04d  TIMEOUT",
+                       (int)Stats.History[Idx].SeqId);
+            break;
+
+          default:
+            UiSetColor (EFI_DARKGRAY, COLOR_BG);
+            UiPrintAt (3, Row, L"  #%04d  ...",
+                       (int)Stats.History[Idx].SeqId);
+            break;
+        }
+
+        Row++;
+        DisplayCount++;
+      }
+    }
+
+    UiDrawStatusBar (L"[ESC] Stop echo test");
+
+    //
+    // Wait ~1 second for next probe, but check for ESC
+    //
+    if (UiWaitKeyTimeout (1000, &Key)) {
+      if (Key.ScanCode == SCAN_ESC ||
+          Key.UnicodeChar == L'q' || Key.UnicodeChar == L'Q') {
+        break;
+      }
     }
   }
 }
@@ -730,7 +951,7 @@ ShowNetworkInterfaces (
     if (DetailView) {
       if (Selected < NicCount) {
         DrawNicDetail (&Nics[Selected]);
-        UiDrawStatusBar (L"[C] Companion Test  [ESC] Back to list");
+        UiDrawStatusBar (L"[1-4] Echo Test  [C] Companion  [ESC] Back");
       } else {
         DrawPciNicDetail (&PciNics[Selected - NicCount]);
         UiDrawStatusBar (L"[ESC] Back to list");
@@ -786,6 +1007,24 @@ ShowNetworkInterfaces (
       } else if ((Key.UnicodeChar == L'c' || Key.UnicodeChar == L'C') &&
                  Selected < NicCount) {
         TestCompanionConnection (&Nics[Selected]);
+        NeedFullClear = TRUE;
+      } else if (Key.UnicodeChar >= L'1' && Key.UnicodeChar <= L'4' &&
+                 Selected < NicCount) {
+        //
+        // Protocol echo test: 1=ARP, 2=ICMP, 3=UDP, 4=TCP
+        //
+        PROBE_PROTOCOL  ProbeProto;
+        EFI_IPv4_ADDRESS  ProbeTarget;
+
+        ProbeProto = (PROBE_PROTOCOL)(Key.UnicodeChar - L'1');
+
+        if (ProbeIsAvailable (&Nics[Selected], ProbeProto)) {
+          //
+          // Use default companion IP as target
+          //
+          ProbeTarget = (EFI_IPv4_ADDRESS)DEFAULT_COMPANION_IP;
+          RunProtocolEchoTest (&Nics[Selected], ProbeProto, &ProbeTarget);
+        }
         NeedFullClear = TRUE;
       }
     } else {

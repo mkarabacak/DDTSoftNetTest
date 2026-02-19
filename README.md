@@ -64,6 +64,7 @@ DDTSoftNetTest/
 │   ├── OsiLayers.h         # OSI layer enum, TEST_CONFIG, TEST_RESULT_DATA
 │   ├── PacketDefs.h        # Ethernet/IP/ICMP/TCP/UDP/ARP header struct'lari
 │   ├── TestCases.h         # Test fonksiyon prototipleri
+│   ├── ProtocolProbe.h     # Echo probe tipleri, istatistikler, API
 │   ├── SystemInfo.h        # SMBIOS, PCI, Driver, ACPI veri yapilari
 │   ├── PciIds.h            # PCI vendor/device ID lookup tablolari
 │   └── UiRenderer.h        # UI fonksiyon prototipleri
@@ -88,6 +89,7 @@ DDTSoftNetTest/
 │   ├── PacketBuilder.c     # Paket olusturma (Ethernet, IP, ICMP, TCP, UDP, ARP)
 │   ├── PacketParser.c      # Paket ayristirma
 │   ├── OsiAnalyzer.c       # OSI katman analizi
+│   ├── ProtocolProbe.c     # Protokol echo probe (ARP/ICMP/UDP/TCP)
 │   ├── ReportExporter.c    # Rapor disa aktarma
 │   └── Utils.c             # Yardimci fonksiyonlar
 ├── Companion/
@@ -186,6 +188,49 @@ Ag performansini yuk altinda olcer:
 - **Raw Frame Flood**: SNP uzerinden maximum hizda raw frame gonderimi
 - **Canli istatistik**: Gonderilen/alinan paket sayisi, kayip orani, ortalama RTT
 - **ASCII RTT grafigi**: Terminal uzerinde gercek zamanli latency grafigi
+
+### Protocol Echo Test — Canli Baglanti Takibi
+
+NIC detay ekraninda desteklenen protokolleri secip periyodik echo testi baslatabilirsiniz. Her saniye bir probe gonderilir, karsi taraftan ayni mesaj geri beklenir. Canli istatistiklerle baglanti durumu izlenir.
+
+**Desteklenen protokoller:**
+
+| # | Protokol | Mekanizma | Port/Yontem | Companion Gerekliligi |
+|---|----------|-----------|-------------|----------------------|
+| 1 | **ARP** | ARP Request → Reply | Raw SNP / EFI_ARP_PROTOCOL | arp_responder (otomatik) |
+| 2 | **ICMP** | Echo Request → Reply | EFI_IP4_PROTOCOL (ID=0xDD50) | Kernel ICMP reply (otomatik) |
+| 3 | **UDP** | Verbatim echo | Port 5000 (EFI_UDP4_PROTOCOL) | udp_echo servisi (otomatik) |
+| 4 | **TCP** | Connect → Send → Receive → Close | Port 22 (EFI_TCP4_PROTOCOL) | tcp_listener servisi (otomatik) |
+
+**Kullanim:**
+
+1. `[N]` Network Interfaces → NIC sec → `Enter` (detay)
+2. Protokol listesinden `[1]`-`[4]` ile test baslat
+3. Canli ekranda: Sent/Recv/Lost, RTT istatistikleri, son 12 probe sonucu
+4. `[ESC]` ile durdur
+
+**Probe mesaj formati:** `DDTECHO|ID=xxxx|TS=xxxxxxxx` (28 byte sabit)
+
+**Canli ekran ornegi:**
+
+```
+UDP Echo Test
+╔══════════════════════════════════════════════════════╗
+║  NIC    : Intel I219-V                              ║
+║  Target : 192.168.100.1                             ║
+║  Port   : 5000 (echo)                               ║
+╠══════════════════════════════════════════════════════╣
+║  Sent: 15   Recv: 14   Lost: 1 (6%)                ║
+║  RTT:  Last=2ms  Avg=3ms  Min=1ms  Max=8ms         ║
+╠══════════════════════════════════════════════════════╣
+║  #0015  PASS   RTT=2ms                              ║
+║  #0014  PASS   RTT=3ms                              ║
+║  #0013  TIMEOUT                                      ║
+║  #0012  PASS   RTT=1ms                              ║
+║  ...                                                 ║
+╚══════════════════════════════════════════════════════╝
+  [ESC] Stop echo test
+```
 
 ### QuickScan — Otomatik Teshis
 
@@ -315,10 +360,27 @@ Companion → EFI:  ACK / READY / ERROR / REPORT / CONFIRM
 
 Companion katman bazli gorevleri:
 - **L1**: ethtool ile link kontrolu
-- **L2**: Raw socket frame, ARP responder
-- **L3**: ICMP reply, TTL paketleri
-- **L4**: TCP listener, UDP echo server
+- **L2**: Raw socket frame, ARP responder (probe tracking)
+- **L3**: ICMP reply, TTL paketleri (DDTECHO ID=0xDD50 tespiti)
+- **L4**: TCP listener (echo + probe), UDP echo server (DDTECHO aware)
 - **L7**: DHCP + DNS (dnsmasq), HTTP server
+
+### Echo Probe Servisleri
+
+Companion baslangicta tum echo probe servislerini otomatik baslatir. EFI tarafindan gonderilen DDTECHO mesajlari taninir ve loglanir:
+
+```
+13:45:02 [INFO   ] arp              : ARP REPLY to 192.168.100.10 (52:54:00:xx:xx:xx) - total: 5
+13:45:03 [INFO   ] icmp             : ICMP PROBE seq=3 from 192.168.100.10 (total: 3) [DDTECHO|ID=0003|TS=0012A3F0]
+13:45:04 [INFO   ] udp_echo         : UDP PROBE #0004 from 192.168.100.10:5001 (total: 4)
+13:45:05 [INFO   ] tcp              : TCP PROBE #0005 from 192.168.100.10:49152 port 22 (total: 5)
+```
+
+Companion'in ek kod degisikligi gerektirmeden calismasi:
+- **ARP**: arp_responder zaten ARP reply gonderiyor
+- **ICMP**: Linux kernel ICMP echo reply yapiyor, icmp_handler izliyor
+- **UDP**: udp_echo port 5000'de gelen her seyi geri gonderiyor
+- **TCP**: tcp_listener port 22'de gelen veriyi echo yapiyor
 
 ## Sorun Giderme
 

@@ -279,6 +279,12 @@ class CompanionApp:
         print(f"  Interface : {self.config['interface']}")
         print(f"  IP        : {self.config['local_ip']}")
         print(f"  Control   : UDP port {self.config['control_port']}")
+        print(f"  {'-' * 56}")
+        print(f"  Echo Probe Services:")
+        print(f"    ARP   : Auto-reply to ARP requests")
+        print(f"    ICMP  : Kernel echo reply (ID=0xDD50 tracking)")
+        print(f"    UDP   : Echo on port {self.config['udp_echo_port']}")
+        print(f"    TCP   : Echo on ports {self.config['tcp_ports']}")
         print(f"  {'=' * 56}\n")
 
         if not self._ensure_interface_ip():

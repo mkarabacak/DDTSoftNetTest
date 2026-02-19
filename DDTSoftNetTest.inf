@@ -30,6 +30,7 @@
   Source/PacketParser.c
   Source/OsiAnalyzer.c
   Source/ReportExporter.c
+  Source/ProtocolProbe.c
   Source/Utils.c
 
 [Packages]
